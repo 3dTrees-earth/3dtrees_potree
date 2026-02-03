@@ -38,8 +38,8 @@ def build_potree_command(params: Parameters) -> List[str]:
         cmd.extend(["-m", params.method])
     
     # Add chunk method
-    if params.chunk_method != "LASZIP":
-        cmd.extend(["--chunkMethod", params.chunk_method])
+    if params.chunkMethod != "LASZIP":
+        cmd.extend(["--chunkMethod", params.chunkMethod])
     
     # Add attributes
     for attr in params.attributes:

@@ -32,7 +32,7 @@ class Parameters(BaseSettings):
         alias=AliasChoices("method", "m")
     )
     
-    chunk_method: str = Field(
+    chunkMethod: str = Field(
         "LASZIP",
         description="Chunking method",
         alias=AliasChoices("chunk-method", "chunk_method", "chunkMethod")
