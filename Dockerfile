@@ -16,8 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt
 RUN git clone --depth 1 --branch 2.1.1 https://github.com/potree/PotreeConverter.git potree_source
 
-# Apply UTF-8 error handling patch
+# Copy and apply patches (duplicate attribute names, UTF-8)
+COPY patches/ /opt/patches/
 WORKDIR /opt/potree_source
+# PotreeConverter 2.1.1 has CRLF in some files; patches are LF
+RUN sed -i 's/\r$//' Converter/include/PotreeConverter.h && \
+    git apply -p1 /opt/patches/duplicate_attributes_keep.patch
+RUN sed -i 's/\r$//' Converter/include/Attributes.h Converter/src/chunker_countsort_laszip.cpp && \
+    git apply -p1 /opt/patches/chunker_classification_lookup.patch
 RUN sed -i 's/string content = js\.dump(4);/string content = js.dump(4, '\'' '\'', false, json::error_handler_t::replace);/' \
     Converter/src/chunker_countsort_laszip.cpp
 

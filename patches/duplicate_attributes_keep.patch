@@ -1,0 +1,68 @@
+diff --git a/Converter/include/PotreeConverter.h b/Converter/include/PotreeConverter.h
+index 5260056..6881049 100644
+--- a/Converter/include/PotreeConverter.h
++++ b/Converter/include/PotreeConverter.h
+@@ -202,13 +202,14 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
+ 	Vector3 scale, offset;
+ 
+ 	vector<Attribute> fullAttributeList;
+-	unordered_map<string, int> acceptedAttributeNames;
++	// Count per base name; only duplicates get _1, _2, ... (first keeps original name)
++	unordered_map<string, int> attributeNameCount;
+ 
+ 	// compute scale and offset from all sources
+ 	{
+ 		mutex mtx;
+ 		auto parallel = std::execution::par;
+-		for_each(parallel, sources.begin(), sources.end(), [&mtx, &sources, &scaleMin, &min, &max, requestedAttributes, &fullAttributeList, &acceptedAttributeNames](Source source) {
++		for_each(parallel, sources.begin(), sources.end(), [&mtx, &sources, &scaleMin, &min, &max, requestedAttributes, &fullAttributeList, &attributeNameCount](Source source) {
+ 
+ 			auto header = loadLasHeader(source.path);
+ 
+@@ -217,11 +218,17 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
+ 			mtx.lock();
+
+ 			for (auto& attribute : attributes) {
+-				bool alreadyAdded = acceptedAttributeNames.find(attribute.name) != acceptedAttributeNames.end();
+-
+-				if (!alreadyAdded) {
+-					fullAttributeList.push_back(attribute);
+-					acceptedAttributeNames[attribute.name] = 1;
+-				}
++				auto it = attributeNameCount.find(attribute.name);
++				if (it == attributeNameCount.end()) {
++					// First occurrence: keep original name
++					fullAttributeList.push_back(attribute);
++					attributeNameCount[attribute.name] = 1;
++				} else {
++					// Duplicate: temporary _2, _3, ...; post-pass will make _1,_2 if multiple
++					int count = ++(it->second);
++					Attribute copy = attribute;
++					copy.name = attribute.name + "_" + to_string(count);
++					fullAttributeList.push_back(copy);
++				}
+ 			}
+
+@@ -255,3 +255,22 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
+ 			});
+
++		// If base occurs multiple times, rename the one with no suffix to base_1
++		unordered_map<string, vector<size_t>> baseToIndices;
++		for (size_t i = 0; i < fullAttributeList.size(); i++) {
++			string name = fullAttributeList[i].name;
++			size_t pos = name.rfind('_');
++			string base = name;
++			if (pos != string::npos && pos > 0 && pos + 1 < name.size()) {
++				bool allDigits = true;
++				for (size_t j = pos + 1; j < name.size(); j++)
++					if (!isdigit((unsigned char)name[j])) { allDigits = false; break; }
++				if (allDigits) base = name.substr(0, pos);
++			}
++			baseToIndices[base].push_back(i);
++		}
++		for (auto& p : baseToIndices)
++			if (p.second.size() > 1)
++				for (size_t k : p.second)
++					if (fullAttributeList[k].name == p.first) { fullAttributeList[k].name = p.first + "_1"; break; }
++
+ 		auto scaleOffset = computeScaleOffset(min, max, scaleMin);
