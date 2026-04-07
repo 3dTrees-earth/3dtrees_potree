@@ -54,6 +54,14 @@ def build_potree_command(params: Parameters) -> List[str]:
     
     if params.no_indexing:
         cmd.append("--no-indexing")
+
+    # Add thread-count override
+    if params.numthreads > 0:
+        cmd.extend(["--numthreads", str(params.numthreads)])
+
+    # Add grid size override
+    if params.grid_size > 0:
+        cmd.extend(["--grid-size", str(params.grid_size)])
     
     # Add page generation
     if params.generate_page:

@@ -61,6 +61,18 @@ class Parameters(BaseSettings):
         description="Disable indexing phase",
         alias=AliasChoices("no-indexing", "no_indexing")
     )
+
+    numthreads: int = Field(
+        0,
+        description="Override detected CPU count / worker thread count (0 = auto)",
+        alias=AliasChoices("numthreads", "num-threads", "num_threads")
+    )
+
+    grid_size: int = Field(
+        0,
+        description="Grid size for chunking phase (0 = auto: 128 for <100M pts, 256 for <500M, 512 for larger)",
+        alias=AliasChoices("grid-size", "grid_size")
+    )
     
     # Page generation
     generate_page: Optional[str] = Field(

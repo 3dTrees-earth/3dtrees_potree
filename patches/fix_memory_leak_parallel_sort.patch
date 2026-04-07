@@ -1,0 +1,28 @@
+diff --git a/Converter/include/sampler_poisson.h b/Converter/include/sampler_poisson.h
+index 244a3b67..ec122b33 100644
+--- a/Converter/include/sampler_poisson.h
++++ b/Converter/include/sampler_poisson.h
+@@ -179,8 +179,7 @@
+
+ 			};
+
+-			auto parallel = std::execution::par_unseq;
+-			std::sort(parallel, points.begin(), points.end(), [center](Point a, Point b) -> bool {
++			std::sort(points.begin(), points.end(), [center](Point a, Point b) -> bool {
+
+ 				auto ax = a.x - center.x;
+ 				auto ay = a.y - center.y;
+diff --git a/Converter/include/sampler_poisson_average.h b/Converter/include/sampler_poisson_average.h
+index 481da4b3..a47d9757 100644
+--- a/Converter/include/sampler_poisson_average.h
++++ b/Converter/include/sampler_poisson_average.h
+@@ -280,8 +280,7 @@
+
+ 			};
+
+-			auto parallel = std::execution::par_unseq;
+-			std::sort(parallel, points.begin(), points.end(), [center](Point a, Point b) -> bool {
++			std::sort(points.begin(), points.end(), [center](Point a, Point b) -> bool {
+
+ 				auto ax = a.x - center.x;
+ 				auto ay = a.y - center.y;
