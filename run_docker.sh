@@ -1,11 +1,15 @@
 #!/bin/bash
 
+INPUT_FOLDER=/home/kg281/data/debug/818/products/standard
+NUMTHREADS=10
+
 docker run -it --rm \
     --cpus=10 \
-    --memory=50g \
+    --memory=100g \
     -u $(id -u kg281):$(id -g kg281) \
-    -v /home/kg281/data/debug/417/single_small:/data \
-    3dtrees_potree_patch \
+    -v $INPUT_FOLDER:/data \
+    3dtrees_potree_threads \
     python /src/run.py \
     --source /data/ \
-    --outdir output_potree
+    --numthreads ${NUMTHREADS} \
+    --outdir output_potree_singles
