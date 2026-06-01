@@ -94,16 +94,23 @@ RUN chmod +x /opt/PotreeConverter/PotreeConverter
 
 # Add to PATH and set library path
 ENV PATH="/opt/PotreeConverter:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/PotreeConverter:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="/opt/PotreeConverter"
 
 # Install Python dependencies
-RUN pip install --no-cache-dir pydantic pydantic-settings
+RUN pip install --no-cache-dir \
+    laspy \
+    lazrs \
+    numpy \
+    pydantic \
+    pydantic-settings \
+    scikit-learn
 
 ENV LANG=en_US.utf-8
 ENV LC_ALL=en_US.utf-8
 
 # Copy Python wrapper scripts
 COPY src/ /src/
+RUN chmod -R a+rX /src
 COPY src/libs /data/output/libs
 
 # Default working directory for point cloud data

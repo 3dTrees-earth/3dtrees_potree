@@ -42,6 +42,61 @@ class Parameters(BaseSettings):
         default_factory=list,
         description="Attributes in output file"
     )
+
+    special_coloring: bool = Field(
+        False,
+        description="Add Julian-style instance coloring as a coloring_id extra dimension before conversion",
+        alias=AliasChoices("special-coloring", "special_coloring")
+    )
+
+    special_coloring_palette: str = Field(
+        "candy",
+        description="Special coloring palette name or comma-separated #RRGGBB color list",
+        alias=AliasChoices("special-coloring-palette", "special_coloring_palette", "special-coloring-col", "special_coloring_col")
+    )
+
+    special_coloring_n_colors: int = Field(
+        10,
+        ge=1,
+        description="Number of non-ground coloring IDs to generate",
+        alias=AliasChoices("special-coloring-n-colors", "special_coloring_n_colors", "special-coloring-n-col", "special_coloring_n_col")
+    )
+
+    special_coloring_n_neighbors: int = Field(
+        10,
+        ge=1,
+        description="Number of nearest instance centroids used for neighbor-aware color assignment",
+        alias=AliasChoices("special-coloring-n-neighbors", "special_coloring_n_neighbors")
+    )
+
+    special_coloring_instance_attribute: str = Field(
+        "PredInstance",
+        description="Point attribute containing instance IDs for special coloring",
+        alias=AliasChoices("special-coloring-instance-attribute", "special_coloring_instance_attribute", "special-coloring-instance-id", "special_coloring_instance_id")
+    )
+
+    special_coloring_ground_id: int = Field(
+        0,
+        description="Instance ID treated as ground/background for special coloring",
+        alias=AliasChoices("special-coloring-ground-id", "special_coloring_ground_id")
+    )
+
+    special_coloring_ground_color: str = Field(
+        "#808080",
+        description="Ground/background color for special coloring as #RRGGBB",
+        alias=AliasChoices("special-coloring-ground-color", "special_coloring_ground_color")
+    )
+
+    special_coloring_sidecar_json: bool = Field(
+        False,
+        description="Write special_coloring_mapping.json and patch generated Potree HTML viewers to use it",
+        alias=AliasChoices(
+            "special-coloring-sidecar-json",
+            "special_coloring_sidecar_json",
+            "special-coloring-mapping-json",
+            "special_coloring_mapping_json",
+        )
+    )
     
     # Boolean flags
     keep_chunks: bool = Field(
@@ -71,7 +126,7 @@ class Parameters(BaseSettings):
     grid_size: int = Field(
         0,
         description="Grid size for chunking phase (0 = auto: 128 for <100M pts, 256 for <500M, 512 for larger)",
-        alias=AliasChoices("grid-size", "grid_size")
+        alias=AliasChoices("grid-size", "grid_size", "gridSize")
     )
     
     # Page generation
