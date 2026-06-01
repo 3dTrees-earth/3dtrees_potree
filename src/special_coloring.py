@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import laspy
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 INSTANCE_ATTRIBUTE = "PredInstance"
 COLOR_ATTRIBUTE = "coloring_id"
@@ -65,6 +70,218 @@ class SpecialColoringResult:
     mapping_path: Path
     source_files: List[Path]
     instance_count: int
+
+
+PotreeCommandBuilder = Callable[[Sequence[str], Sequence[str]], List[str]]
+PotreeCommandRunner = Callable[[Sequence[str]], str]
+
+
+def run_special_coloring_conversion(
+    *,
+    sources: Sequence[str],
+    outdir: Path,
+    attributes: Sequence[str],
+    instance_attribute: str,
+    palette_name: str,
+    n_colors: int,
+    n_neighbors: int,
+    ground_instance_id: int,
+    ground_color: str,
+    write_sidecar_json: bool,
+    generate_page: Optional[str],
+    build_command: PotreeCommandBuilder,
+    run_command: PotreeCommandRunner,
+) -> str:
+    outdir.parent.mkdir(parents=True, exist_ok=True)
+    if attributes:
+        logger.info("Ignoring --attributes because --special-coloring uses PotreeConverter defaults.")
+
+    with tempfile.TemporaryDirectory(prefix="potree_special_coloring_", dir=str(outdir.parent)) as tmp_dir:
+        mapping_path = outdir / "special_coloring_mapping.json"
+        result = prepare_special_coloring_inputs(
+            sources,
+            Path(tmp_dir),
+            mapping_path,
+            instance_attribute=instance_attribute,
+            palette_name=palette_name,
+            n_colors=n_colors,
+            n_neighbors=n_neighbors,
+            ground_instance_id=ground_instance_id,
+            ground_color=ground_color,
+            write_sidecar_json=write_sidecar_json,
+        )
+        logger.info(
+            "Special coloring prepared %s input file(s), %s non-ground instance(s), "
+            "instance_attribute=%s, palette=%s, n_colors=%s, n_neighbors=%s, ground_id=%s, sidecar_json=%s, mapping=%s",
+            len(result.source_files),
+            result.instance_count,
+            instance_attribute,
+            palette_name,
+            n_colors,
+            n_neighbors,
+            ground_instance_id,
+            write_sidecar_json,
+            result.mapping_path if write_sidecar_json else None,
+        )
+        command = build_command(result.sources, [])
+        stdout = run_command(command)
+        if write_sidecar_json:
+            for copied_path in copy_mapping_to_metadata_siblings(outdir, mapping_path):
+                logger.info("Copied special coloring mapping beside metadata: %s", copied_path)
+            if generate_page:
+                patched_html = patch_special_coloring_viewer_html(outdir, generate_page, mapping_path.name)
+                if patched_html:
+                    logger.info("Patched generated viewer for special coloring sidecar: %s", patched_html)
+        return stdout
+
+
+def copy_mapping_to_metadata_siblings(outdir: Path, mapping_path: Path) -> List[Path]:
+    copied_paths: List[Path] = []
+    if not mapping_path.exists() or not outdir.exists():
+        return copied_paths
+
+    for metadata_path in sorted(outdir.rglob("metadata.json")):
+        target_path = metadata_path.parent / mapping_path.name
+        if target_path.resolve() == mapping_path.resolve():
+            continue
+        shutil.copyfile(mapping_path, target_path)
+        copied_paths.append(target_path)
+
+    return copied_paths
+
+
+def patch_special_coloring_viewer_html(outdir: Path, page_name: str, mapping_filename: str) -> Optional[Path]:
+    html_path = outdir / f"{page_name}.html"
+    if not html_path.exists():
+        return None
+
+    html = html_path.read_text(encoding="utf-8")
+    marker = "3DTREES_SPECIAL_COLORING_VIEWER_PATCH_V2"
+    if marker in html:
+        return html_path
+
+    metadata_url = f"./pointclouds/{page_name}/metadata.json"
+    load_line = f'Potree.loadPointCloud("{metadata_url}", "{page_name}", e => {{'
+    active_attr_line = 'material.activeAttributeName = "rgba";'
+    if load_line not in html or active_attr_line not in html:
+        logger.warning("Could not patch %s: expected Potree viewer lines not found", html_path)
+        return None
+
+    helper = SPECIAL_COLORING_VIEWER_HELPER.format(marker=marker, mapping_filename=mapping_filename)
+    patched = html.replace(load_line, helper + "\n\n\t\t" + load_line, 1)
+    patched = patched.replace(
+        active_attr_line,
+        active_attr_line + f'\n\t\t\tapply3DtreesSpecialColoring(pointcloud, "{metadata_url}");',
+        1,
+    )
+    patched = patched.replace(
+        "url('../build/potree/resources/images/background.jpg')",
+        "url('./libs/potree/resources/images/background.jpg')",
+    )
+    html_path.write_text(patched, encoding="utf-8")
+    return html_path
+
+
+SPECIAL_COLORING_VIEWER_HELPER = """
+
+\t\tconst THREEDTREES_SPECIAL_COLORING_VIEWER_PATCH = true; // {marker}
+\t\tasync function apply3DtreesSpecialColoring(pointcloud, metadataUrl) {{
+\t\t\tconst mappingUrl = new URL("{mapping_filename}", new URL(metadataUrl, window.location.href)).href;
+\t\t\tlet mapping;
+\t\t\ttry {{
+\t\t\t\tconst response = await fetch(mappingUrl);
+\t\t\t\tif (!response.ok) {{
+\t\t\t\t\tconsole.warn(`Special coloring mapping unavailable (${{response.status}}).`);
+\t\t\t\t\treturn;
+\t\t\t\t}}
+\t\t\t\tmapping = await response.json();
+\t\t\t}} catch (error) {{
+\t\t\t\tconsole.warn("Special coloring mapping could not be loaded.", error);
+\t\t\t\treturn;
+\t\t\t}}
+
+\t\t\tconst colorAttributeName = mapping.color_attribute || "coloring_id";
+\t\t\tconst attributes = pointcloud?.pcoGeometry?.pointAttributes?.attributes || [];
+\t\t\tconst attrInfo = attributes.find(attribute => attribute?.name === colorAttributeName);
+\t\t\tif (!attrInfo || !mapping.coloring_id_to_color) {{
+\t\t\t\treturn;
+\t\t\t}}
+
+\t\t\tconst entries = Object.entries(mapping.coloring_id_to_color)
+\t\t\t\t.map(([id, entry]) => [Number(id), entry])
+\t\t\t\t.filter(([id, entry]) => Number.isFinite(id) && Array.isArray(entry?.rgb) && entry.rgb.length >= 3)
+\t\t\t\t.sort((a, b) => a[0] - b[0]);
+\t\t\tif (entries.length === 0) {{
+\t\t\t\treturn;
+\t\t\t}}
+
+\t\t\tconst maxId = Math.max(...entries.map(([id]) => id));
+\t\t\tattrInfo.range = [0, maxId];
+\t\t\tattrInfo.initialRange = [0, maxId];
+
+\t\t\tconst glslFloat = value => `${{Number(value).toFixed(8)}}`;
+\t\t\tconst colorLines = entries.map(([id, entry]) => {{
+\t\t\t\tconst rgb = entry.rgb.map(value => Math.max(0, Math.min(255, Number(value))) / 255);
+\t\t\t\treturn `\\tif (abs(colorId - ${{glslFloat(id)}}) < 0.25) {{ return vec3(${{glslFloat(rgb[0])}}, ${{glslFloat(rgb[1])}}, ${{glslFloat(rgb[2])}}); }}`;
+\t\t\t}});
+\t\t\tconst shaderGetExtra = [
+\t\t\t\t"vec3 getExtra(){{",
+\t\t\t\t"\\t// THREEDTREES_COLORING_ID_SHADER: exact categorical sidecar mapping",
+\t\t\t\t"\\tfloat colorId = floor(aExtra + 0.5);",
+\t\t\t\t...colorLines,
+\t\t\t\t"\\treturn vec3(0.15, 0.15, 0.15);",
+\t\t\t\t"}}"
+\t\t\t].join("\\n");
+
+\t\t\tconst material = pointcloud.material;
+\t\t\tconst installColoringShader = () => {{
+\t\t\t\tlet source = material.vertexShader;
+\t\t\t\tif (!source || source.includes("THREEDTREES_COLORING_ID_SHADER")) {{
+\t\t\t\t\treturn;
+\t\t\t\t}}
+\t\t\t\tconst start = source.indexOf("vec3 getExtra(){{");
+\t\t\t\tconst endMarker = "\\n\\nvec3 getColor(){{";
+\t\t\t\tconst end = start >= 0 ? source.indexOf(endMarker, start) : -1;
+\t\t\t\tif (start < 0 || end < 0) {{
+\t\t\t\t\tconsole.warn("Could not install special coloring shader: getExtra() not found.");
+\t\t\t\t\treturn;
+\t\t\t\t}}
+\t\t\t\tmaterial.vertexShader = source.slice(0, start) + shaderGetExtra + source.slice(end);
+\t\t\t\tmaterial.needsUpdate = true;
+\t\t\t}};
+
+\t\t\tif (!material.__3dtreesOriginalUpdateShaderSource) {{
+\t\t\t\tmaterial.__3dtreesOriginalUpdateShaderSource = material.updateShaderSource.bind(material);
+\t\t\t\tmaterial.updateShaderSource = () => {{
+\t\t\t\t\tmaterial.__3dtreesOriginalUpdateShaderSource();
+\t\t\t\t\tinstallColoringShader();
+\t\t\t\t}};
+\t\t\t}}
+
+\t\t\tmaterial.activeAttributeName = colorAttributeName;
+\t\t\tif (typeof material.setRange === "function") {{
+\t\t\t\tmaterial.setRange(colorAttributeName, [0, maxId]);
+\t\t\t}}
+\t\t\tmaterial.intensityRange = [0, maxId];
+\t\t\tinstallColoringShader();
+
+\t\t\tconst syncSidebar = () => {{
+\t\t\t\tconst selector = window.$ ? $("#optMaterial") : null;
+\t\t\t\tif (!selector || selector.length === 0) {{
+\t\t\t\t\treturn;
+\t\t\t\t}}
+\t\t\t\tselector.val(colorAttributeName);
+\t\t\t\ttry {{ selector.selectmenu("refresh"); }} catch (error) {{}}
+\t\t\t}};
+\t\t\tsyncSidebar();
+\t\t\twindow.setTimeout(syncSidebar, 500);
+\t\t\twindow.setTimeout(syncSidebar, 1500);
+
+\t\t\tif (typeof viewer.render === "function") {{
+\t\t\t\tviewer.render();
+\t\t\t}}
+\t\t}}
+"""
 
 
 def prepare_special_coloring_inputs(
