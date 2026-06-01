@@ -32,7 +32,7 @@ class Parameters(BaseSettings):
         alias=AliasChoices("method", "m")
     )
     
-    chunk_method: str = Field(
+    chunkMethod: str = Field(
         "LASZIP",
         description="Chunking method",
         alias=AliasChoices("chunk-method", "chunk_method", "chunkMethod")
@@ -41,18 +41,6 @@ class Parameters(BaseSettings):
     attributes: List[str] = Field(
         default_factory=list,
         description="Attributes in output file"
-    )
-
-    grid_size: int = Field(
-        0,
-        description="Accepted for Galaxy compatibility; PotreeConverter 2.1.1 selects grid size automatically",
-        alias=AliasChoices("grid-size", "grid_size", "gridSize")
-    )
-
-    numthreads: Optional[int] = Field(
-        None,
-        description="Accepted for Galaxy compatibility; PotreeConverter 2.1.1 uses all available processors",
-        alias=AliasChoices("numthreads", "num-threads", "num_threads")
     )
 
     special_coloring: bool = Field(
@@ -127,6 +115,18 @@ class Parameters(BaseSettings):
         False,
         description="Disable indexing phase",
         alias=AliasChoices("no-indexing", "no_indexing")
+    )
+
+    numthreads: int = Field(
+        0,
+        description="Override detected CPU count / worker thread count (0 = auto)",
+        alias=AliasChoices("numthreads", "num-threads", "num_threads")
+    )
+
+    grid_size: int = Field(
+        0,
+        description="Grid size for chunking phase (0 = auto: 128 for <100M pts, 256 for <500M, 512 for larger)",
+        alias=AliasChoices("grid-size", "grid_size", "gridSize")
     )
     
     # Page generation

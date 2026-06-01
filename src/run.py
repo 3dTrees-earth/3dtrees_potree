@@ -60,8 +60,8 @@ def build_potree_command(
         command.extend(["--encoding", params.encoding])
     if params.method != "poisson":
         command.extend(["-m", params.method])
-    if params.chunk_method != "LASZIP":
-        command.extend(["--chunkMethod", params.chunk_method])
+    if params.chunkMethod != "LASZIP":
+        command.extend(["--chunkMethod", params.chunkMethod])
     for attr in normalize_attributes(attributes if attributes is not None else params.attributes):
         command.extend(["--attributes", attr])
     if params.keep_chunks:
@@ -70,6 +70,10 @@ def build_potree_command(
         command.append("--no-chunking")
     if params.no_indexing:
         command.append("--no-indexing")
+    if params.numthreads > 0:
+        command.extend(["--numthreads", str(params.numthreads)])
+    if params.grid_size > 0:
+        command.extend(["--grid-size", str(params.grid_size)])
     if params.generate_page:
         command.extend(["-p", params.generate_page])
     if params.title:
@@ -89,11 +93,6 @@ def run_command(command: Sequence[str]) -> str:
 
 
 def run(params: Parameters) -> str:
-    if params.grid_size:
-        logger.info("Ignoring --grid-size: PotreeConverter 2.1.1 selects grid size automatically.")
-    if params.numthreads:
-        logger.info("Ignoring --numthreads: PotreeConverter 2.1.1 uses its built-in thread selection.")
-
     if not params.special_coloring:
         return run_command(build_potree_command(params))
 

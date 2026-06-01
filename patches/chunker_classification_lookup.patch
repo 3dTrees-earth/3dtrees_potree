@@ -1,0 +1,56 @@
+diff --git a/Converter/include/Attributes.h b/Converter/include/Attributes.h
+index c2a2541..b75766d 100644
+--- a/Converter/include/Attributes.h
++++ b/Converter/include/Attributes.h
+@@ -170,6 +170,13 @@ struct Attributes {
+ 			offset += attribute.size;
+ 		}
+ 
++		// Fallback: try name_1 for renamed duplicate attributes
++		string alt = name + "_1";
++		offset = 0;
++		for (auto& attribute : list) {
++			if (attribute.name == alt) return offset;
++			offset += attribute.size;
++		}
+ 		return -1;
+ 	}
+ 
+@@ -179,7 +186,12 @@ struct Attributes {
+ 				return &attribute;
+ 			}
+ 		}
+-		
++
++		// Fallback: try name_1 for renamed duplicate attributes
++		string alt = name + "_1";
++		for (auto& attribute : list) {
++			if (attribute.name == alt) return &attribute;
++		}
+ 		return nullptr;
+ 	}
+ 
+diff --git a/Converter/src/chunker_countsort_laszip.cpp b/Converter/src/chunker_countsort_laszip.cpp
+index 2f47712..e03b325 100644
+--- a/Converter/src/chunker_countsort_laszip.cpp
++++ b/Converter/src/chunker_countsort_laszip.cpp
+@@ -528,6 +528,19 @@ namespace chunker_countsort_laszip {
+ 				{"classification flags", classificationFlags},
+ 			};
+ 
++			// Add aliases for renamed standard attributes (e.g. classification -> classification_1)
++			for (auto& attr : outputAttributes.list) {
++				string aname = attr.name;
++				size_t upos = aname.rfind('_');
++				if (upos == string::npos || upos == 0 || upos + 1 >= aname.size()) continue;
++				string base = aname.substr(0, upos);
++				string suffix = aname.substr(upos + 1);
++				bool isNum = true;
++				for (char c : suffix) if (!isdigit((unsigned char)c)) { isNum = false; break; }
++				if (isNum && mapping.count(base) && !mapping.count(aname))
++					mapping[aname] = mapping[base];
++			}
++
+ 			for (auto& attribute : inputAttributes.list) {
+ 
+ 				attributeOffset += attribute.size;

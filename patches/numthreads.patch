@@ -1,0 +1,178 @@
+diff --git a/Converter/include/converter_utils.h b/Converter/include/converter_utils.h
+index 60d1d3e..ff86e18 100644
+--- a/Converter/include/converter_utils.h
++++ b/Converter/include/converter_utils.h
+@@ -170,8 +170,9 @@ struct Options {
+ 	string pageTitle = "";
+ 	string projection = "";
+ 
+-	bool keepChunks = false;
+-	bool noChunking = false;
+-	bool noIndexing = false;
+-
+-};
+\ No newline at end of file
++	bool keepChunks = false;
++	bool noChunking = false;
++	bool noIndexing = false;
++	int numThreads = 0;
++
++};
+diff --git a/Converter/modules/unsuck/unsuck.hpp b/Converter/modules/unsuck/unsuck.hpp
+index f114426..3d7c7f7 100644
+--- a/Converter/modules/unsuck/unsuck.hpp
++++ b/Converter/modules/unsuck/unsuck.hpp
+@@ -65,9 +65,11 @@ struct CpuData {
+ 
+ MemoryData getMemoryData();
+ 
+-CpuData getCpuData();
+-
+-void printMemoryReport();
++CpuData getCpuData();
++
++void setNumProcessorsOverride(size_t value);
++
++void printMemoryReport();
+ 
+ void launchMemoryChecker(int64_t maxMB, double checkInterval);
+ 
+diff --git a/Converter/modules/unsuck/unsuck_platform_specific.cpp b/Converter/modules/unsuck/unsuck_platform_specific.cpp
+index 0fc6b14..a66d962 100644
+--- a/Converter/modules/unsuck/unsuck_platform_specific.cpp
++++ b/Converter/modules/unsuck/unsuck_platform_specific.cpp
+@@ -140,12 +140,16 @@ CpuData getCpuData() {
+ 
+ 	CpuData data;
+ 	data.numProcessors = numProcessors;
+-	data.usage = percent * 100.0;
+-
+-	return data;
+-}
+-
+-#elif defined(__linux__)
++	data.usage = percent * 100.0;
++
++	return data;
++}
++
++void setNumProcessorsOverride(size_t value) {
++	numProcessors = value > 0 ? int(value) : int(std::thread::hardware_concurrency());
++}
++
++#elif defined(__linux__)
+ 
+ // see https://stackoverflow.com/questions/63166/how-to-determine-cpu-and-memory-consumption-from-inside-a-process
+ 
+@@ -351,10 +355,14 @@ CpuData getCpuData() {
+ 
+ 	CpuData data;
+ 	data.numProcessors = numProcessors;
+-	data.usage = getCpuUsage();
+-
+-	return data;
+-}
+-
+-
+-#endif
+\ No newline at end of file
++	data.usage = getCpuUsage();
++
++	return data;
++}
++
++void setNumProcessorsOverride(size_t value) {
++	numProcessors = value > 0 ? int(value) : int(std::thread::hardware_concurrency());
++}
++
++
++#endif
+diff --git a/Converter/src/main.cpp b/Converter/src/main.cpp
+index 9d14d49..59e92be 100644
+--- a/Converter/src/main.cpp
++++ b/Converter/src/main.cpp
+@@ -29,11 +29,12 @@ Options parseArguments(int argc, char** argv) {
+ 	args.addArgument("chunkMethod", "Chunking method");
+ 	args.addArgument("keep-chunks", "Skip deleting temporary chunks during conversion");
+ 	args.addArgument("no-chunking", "Disable chunking phase");
+-	args.addArgument("no-indexing", "Disable indexing phase");
+-	args.addArgument("attributes", "Attributes in output file");
+-	args.addArgument("projection", "Add the projection of the pointcloud to the metadata");
+-	args.addArgument("generate-page,p", "Generate a ready to use web page with the given name");
+-	args.addArgument("title", "Page title used when generating a web page");
++	args.addArgument("no-indexing", "Disable indexing phase");
++	args.addArgument("attributes", "Attributes in output file");
++	args.addArgument("projection", "Add the projection of the pointcloud to the metadata");
++	args.addArgument("numthreads", "Override detected CPU count / worker thread count");
++	args.addArgument("generate-page,p", "Generate a ready to use web page with the given name");
++	args.addArgument("title", "Page title used when generating a web page");
+ 
+ 	if (args.has("help")) {
+ 		cout << "PotreeConverter <source> -o <outdir>" << endl;
+@@ -114,9 +115,10 @@ Options parseArguments(int argc, char** argv) {
+ 	string pageTitle = args.get("title").as<string>();
+ 	string projection = args.get("projection").as<string>();
+ 
+-	bool keepChunks = args.has("keep-chunks");
+-	bool noChunking = args.has("no-chunking");
+-	bool noIndexing = args.has("no-indexing");
++	bool keepChunks = args.has("keep-chunks");
++	bool noChunking = args.has("no-chunking");
++	bool noIndexing = args.has("no-indexing");
++	int numThreads = args.get("numthreads").as<int>(0);
+ 
+ 	Options options;
+ 	options.source = source;
+@@ -131,9 +133,10 @@ Options parseArguments(int argc, char** argv) {
+ 	options.pageTitle = pageTitle;
+ 	options.projection = projection;
+ 
+-	options.keepChunks = keepChunks;
+-	options.noChunking = noChunking;
+-	options.noIndexing = noIndexing;
++	options.keepChunks = keepChunks;
++	options.noChunking = noChunking;
++	options.noIndexing = noIndexing;
++	options.numThreads = numThreads;
+ 
+ 	//cout << "flags: ";
+ 	//for (string flag : options.flags) {
+@@ -510,16 +513,21 @@ int main(int argc, char** argv) {
+ 
+ 
+ 
+-	double tStart = now(); 
+-
+-	auto exePath = fs::canonical(fs::absolute(argv[0])).parent_path().string();
+-
+-	launchMemoryChecker(2 * 1024, 0.1);
+-	auto cpuData = getCpuData();
+-
+-	cout << "#threads: " << cpuData.numProcessors << endl;
+-
+-	auto options = parseArguments(argc, argv);
++	double tStart = now(); 
++
++	auto exePath = fs::canonical(fs::absolute(argv[0])).parent_path().string();
++	auto options = parseArguments(argc, argv);
++
++	launchMemoryChecker(2 * 1024, 0.1);
++	if (options.numThreads > 0) {
++		setNumProcessorsOverride(options.numThreads);
++	}
++	auto cpuData = getCpuData();
++
++	cout << "#threads: " << cpuData.numProcessors << endl;
++	if (options.numThreads > 0) {
++		cout << "#threads override: " << options.numThreads << endl;
++	}
+ 
+ 	auto [name, sources] = curateSources(options.source);
+ 	if (options.name.size() == 0) {
+@@ -566,4 +574,4 @@ int main(int argc, char** argv) {
+ 
+ 
+ 	return 0;
+-}
+\ No newline at end of file
++}
