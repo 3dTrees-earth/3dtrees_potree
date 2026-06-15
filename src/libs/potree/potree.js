@@ -63245,7 +63245,13 @@ void main() {
 					let initialRange = attGPS.initialRange;
 					let initialRangeSize = initialRange[1] - initialRange[0];
 
-					let globalRange = attGPS.range;
+					let materialGpsRange = typeof material.getRange === "function" ? material.getRange("gps-time") : null;
+					let globalRange = materialGpsRange
+						&& Number.isFinite(materialGpsRange[0])
+						&& Number.isFinite(materialGpsRange[1])
+						&& materialGpsRange[1] > materialGpsRange[0]
+						? materialGpsRange
+						: attGPS.range;
 					let globalRangeSize = globalRange[1] - globalRange[0];
 
 					let scale = initialRangeSize / globalRangeSize;
