@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
+from attribute_node_stats import write_attribute_node_stats_for_outdir
 from parameters import Parameters
 from special_coloring import run_special_coloring_conversion
 
@@ -27,6 +28,8 @@ BOOLEAN_FLAGS = {
     "--special_coloring_sidecar_json",
     "--special-coloring-mapping-json",
     "--special_coloring_mapping_json",
+    "--attribute-node-stats",
+    "--attribute_node_stats",
 }
 
 
@@ -94,28 +97,36 @@ def run_command(command: Sequence[str]) -> str:
 
 def run(params: Parameters) -> str:
     if not params.special_coloring:
-        return run_command(build_potree_command(params))
+        output = run_command(build_potree_command(params))
+    else:
+        params.outdir = params.outdir or Path("output")
+        output = run_special_coloring_conversion(
+            sources=params.source,
+            outdir=params.outdir,
+            attributes=params.attributes,
+            instance_attribute=params.special_coloring_instance_attribute,
+            palette_name=params.special_coloring_palette,
+            n_colors=params.special_coloring_n_colors,
+            n_neighbors=params.special_coloring_n_neighbors,
+            ground_instance_id=params.special_coloring_ground_id,
+            ground_color=params.special_coloring_ground_color,
+            write_sidecar_json=params.special_coloring_sidecar_json,
+            generate_page=params.generate_page,
+            build_command=lambda sources, attributes: build_potree_command(
+                params,
+                sources=sources,
+                attributes=attributes,
+            ),
+            run_command=run_command,
+        )
 
-    params.outdir = params.outdir or Path("output")
-    return run_special_coloring_conversion(
-        sources=params.source,
-        outdir=params.outdir,
-        attributes=params.attributes,
-        instance_attribute=params.special_coloring_instance_attribute,
-        palette_name=params.special_coloring_palette,
-        n_colors=params.special_coloring_n_colors,
-        n_neighbors=params.special_coloring_n_neighbors,
-        ground_instance_id=params.special_coloring_ground_id,
-        ground_color=params.special_coloring_ground_color,
-        write_sidecar_json=params.special_coloring_sidecar_json,
-        generate_page=params.generate_page,
-        build_command=lambda sources, attributes: build_potree_command(
-            params,
-            sources=sources,
-            attributes=attributes,
-        ),
-        run_command=run_command,
-    )
+    if params.attribute_node_stats:
+        if params.outdir is None:
+            logger.warning("Skipping attribute_node_stats.json because --outdir was not provided.")
+        else:
+            write_attribute_node_stats_for_outdir(Path(params.outdir))
+
+    return output
 
 
 def main() -> int:

@@ -64,6 +64,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 | `--special-coloring-ground-id` | | int | `0` | Instance ID treated as ground/background; negative instance IDs are also treated as background |
 | `--special-coloring-ground-color` | | str | `#808080` | Ground/background color |
 | `--special-coloring-sidecar-json` | | bool | `False` | Write `special_coloring_mapping.json` and patch generated Potree HTML viewers to use it |
+| `--attribute-node-stats` | | bool | `True` | Write `attribute_node_stats.json` beside generated `metadata.json` files for fast frontend filtering |
 | `--keep-chunks` | | bool | `False` | Skip deleting temporary chunks |
 | `--no-chunking` | | bool | `False` | Disable chunking phase |
 | `--no-indexing` | | bool | `False` | Disable indexing phase |
@@ -188,6 +189,9 @@ PotreeConverter 2.0 produces:
 
 With `--special-coloring-sidecar-json`, the output directory also contains:
 - **special_coloring_mapping.json**: Mapping from `coloring_id` to RGB/hex colors and from `PredInstance` to `coloring_id`
+
+By default, the output directory also contains:
+- **attribute_node_stats.json**: Per-node subtree summaries for scalar Potree attributes. The frontend uses these `min`/`max` ranges and small categorical `values` sets to skip octree branches that cannot match active filters.
 
 ## Requirements
 

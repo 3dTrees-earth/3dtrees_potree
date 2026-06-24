@@ -100,6 +100,7 @@ ENV LD_LIBRARY_PATH="/opt/PotreeConverter"
 RUN pip install --no-cache-dir \
     laspy \
     lazrs \
+    brotli \
     numpy \
     pydantic \
     pydantic-settings \

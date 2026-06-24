@@ -97,6 +97,12 @@ class Parameters(BaseSettings):
             "special_coloring_mapping_json",
         )
     )
+
+    attribute_node_stats: bool = Field(
+        True,
+        description="Write attribute_node_stats.json beside generated Potree metadata.json files for fast frontend filtering",
+        alias=AliasChoices("attribute-node-stats", "attribute_node_stats")
+    )
     
     # Boolean flags
     keep_chunks: bool = Field(
