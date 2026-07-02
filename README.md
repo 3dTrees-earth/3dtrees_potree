@@ -15,6 +15,7 @@ PotreeConverter generates an octree LOD structure for streaming and real-time re
 - ✅ **Multiple parameter aliases** - Supports both Python-style (`--output_dir`) and CLI-style (`--output-dir`) naming
 - ✅ **Slim Docker image** - ~200-250MB using Python 3.11-slim base
 - ✅ **Pre-built binary** - Uses official PotreeConverter 2.1.1 release from GitHub
+- ✅ **Multi-attribute special coloring** - Adds deterministic coloring dimensions for multiple instance attributes
 - ✅ **Comprehensive logging** - Detailed execution logs with timestamps
 
 ## Quick Start
@@ -53,6 +54,14 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 | `--method` | `-m` | str | `poisson` | Sampling method: `poisson`, `poisson_average`, `random` |
 | `--chunk-method` | | str | `LASZIP` | Chunking method |
 | `--attributes` | | List[str] | `[]` | Attributes in output file |
+| `--special-coloring` | | bool | `False` | Add instance-based coloring dimensions before conversion |
+| `--special-coloring-instance-attributes` | | List[str] | `PredInstance_SAT`, `PredInstance_FoMa` | Instance attributes to color; comma-separated or repeated values are supported |
+| `--special-coloring-instance-attribute` | | str | `None` | Backward-compatible single instance attribute override |
+| `--special-coloring-palette` | | str | `candy` | Palette name or comma-separated `#RRGGBB` colors |
+| `--special-coloring-n-colors` | | int | `10` | Number of non-ground coloring IDs |
+| `--special-coloring-n-neighbors` | | int | `10` | Neighbor count for color assignment |
+| `--special-coloring-ground-id` | | int | `0` | Ground/background instance ID |
+| `--special-coloring-ground-color` | | str | `#808080` | Ground/background color |
 | `--keep-chunks` | | bool | `False` | Skip deleting temporary chunks |
 | `--no-chunking` | | bool | `False` | Disable chunking phase |
 | `--no-indexing` | | bool | `False` | Disable indexing phase |
@@ -109,6 +118,29 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
   --keep-chunks
 ```
 
+### Special Coloring for Multiple Instance Attributes
+
+By default, `--special-coloring` reads `PredInstance_SAT` and `PredInstance_FoMa`.
+If the input uses `PredInstance_FM`, it is accepted as the FoMa alias and produces
+`coloring_foma`. The SAT default produces `coloring_id_sat`.
+
+```bash
+docker run --rm --cpus=10 --memory=50g -v /path/to/data:/data 3dtrees_potree \
+  --source /data/input.laz \
+  --outdir /data/potree \
+  --special-coloring
+```
+
+Custom attributes may be repeated or comma-separated:
+
+```bash
+docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  --source /data/input.laz \
+  --outdir /data/potree \
+  --special-coloring \
+  --special-coloring-instance-attributes PredInstance_SAT,PredInstance_FM
+```
+
 ### View Help
 
 ```bash
@@ -122,6 +154,7 @@ docker run --rm 3dtrees_potree --help
 ├── Dockerfile              # Docker image definition
 ├── src/
 │   ├── parameters.py       # Pydantic parameter definitions
+│   ├── special_coloring.py # Instance coloring preprocessing
 │   └── run.py             # Main execution script
 └── README.md              # This file
 ```
