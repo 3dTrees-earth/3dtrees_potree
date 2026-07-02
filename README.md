@@ -10,12 +10,12 @@ PotreeConverter generates an octree LOD structure for streaming and real-time re
 
 ## Features
 
-- ✅ **All PotreeConverter parameters exposed** - Full access to all 11 CLI options
+- ✅ **Core PotreeConverter parameters exposed** - Conversion, sampling, encoding, attributes, and page generation
 - ✅ **Type-safe parameter validation** - Using Pydantic for robust input validation
 - ✅ **Multiple parameter aliases** - Supports both Python-style (`--output_dir`) and CLI-style (`--output-dir`) naming
 - ✅ **Slim Docker image** - ~200-250MB using Python 3.11-slim base
 - ✅ **Pre-built binary** - Uses official PotreeConverter 2.1.1 release from GitHub
-- ✅ **Multi-attribute special coloring** - Adds deterministic coloring dimensions for multiple instance attributes
+- ✅ **Multi-attribute special coloring** - Adds optional neighbor-aware coloring dimensions while preserving source RGB
 - ✅ **Comprehensive logging** - Detailed execution logs with timestamps
 
 ## Quick Start
@@ -32,6 +32,7 @@ Convert a single LAS/LAZ file:
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/input.las \
   --outdir /data/output
 ```
@@ -40,6 +41,7 @@ Convert all files in a directory:
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/input_dir \
   --outdir /data/output
 ```
@@ -50,18 +52,19 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 |-----------|-------|------|---------|-------------|
 | `--source` | `-i` | List[str] | *required* | Input file(s) or directory containing LAS/LAZ files |
 | `--outdir` | `-o` | Path | *auto-generated* | Output directory |
-| `--encoding` | | str | `DEFAULT` | Encoding type: `BROTLI`, `UNCOMPRESSED`, `DEFAULT` |
+| `--encoding` | | str | `BROTLI` | Encoding type: `BROTLI`, `UNCOMPRESSED`, `DEFAULT` |
 | `--method` | `-m` | str | `poisson` | Sampling method: `poisson`, `poisson_average`, `random` |
 | `--chunk-method` | | str | `LASZIP` | Chunking method |
 | `--attributes` | | List[str] | `[]` | Attributes in output file |
 | `--special-coloring` | | bool | `False` | Add instance-based coloring dimensions before conversion |
+| `--special-coloring-palette` | | str | `candy` | Palette name or comma-separated `#RRGGBB` colors for special coloring |
+| `--special-coloring-n-colors` | | int | `10` | Number of non-ground coloring IDs |
+| `--special-coloring-n-neighbors` | | int | `10` | Number of nearest instance centroids used to avoid nearby color collisions |
 | `--special-coloring-instance-attributes` | | List[str] | `PredInstance_SAT`, `PredInstance_FoMa` | Instance attributes to color; comma-separated or repeated values are supported |
 | `--special-coloring-instance-attribute` | | str | `None` | Backward-compatible single instance attribute override |
-| `--special-coloring-palette` | | str | `candy` | Palette name or comma-separated `#RRGGBB` colors |
-| `--special-coloring-n-colors` | | int | `10` | Number of non-ground coloring IDs |
-| `--special-coloring-n-neighbors` | | int | `10` | Neighbor count for color assignment |
-| `--special-coloring-ground-id` | | int | `0` | Ground/background instance ID |
+| `--special-coloring-ground-id` | | int | `0` | Instance ID treated as ground/background; negative instance IDs are also treated as background |
 | `--special-coloring-ground-color` | | str | `#808080` | Ground/background color |
+| `--special-coloring-sidecar-json` | | bool | `False` | Write `special_coloring_mapping.json` and patch generated Potree HTML viewers to use it |
 | `--keep-chunks` | | bool | `False` | Skip deleting temporary chunks |
 | `--no-chunking` | | bool | `False` | Disable chunking phase |
 | `--no-indexing` | | bool | `False` | Disable indexing phase |
@@ -74,6 +77,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/input.las \
   --outdir /data/output \
   --method poisson_average
@@ -83,6 +87,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/input.las \
   --outdir /data/output \
   --encoding BROTLI
@@ -92,6 +97,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/file1.las /data/file2.las /data/file3.las \
   --outdir /data/output
 ```
@@ -100,6 +106,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/input.las \
   --outdir /data/output \
   --generate-page mycloud \
@@ -110,6 +117,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
   --source /data/input.las \
   --outdir /data/output \
   --method random \
@@ -118,33 +126,38 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
   --keep-chunks
 ```
 
-### Special Coloring for Multiple Instance Attributes
+### With Special Instance Coloring
 
-By default, `--special-coloring` reads `PredInstance_SAT` and `PredInstance_FoMa`.
-If the input uses `PredInstance_FM`, it is accepted as the FoMa alias and produces
-`coloring_foma`. The SAT default produces `coloring_id_sat`.
+Preserve original RGB while adding display-only coloring attributes based on instance extra dimensions. By default, `--special-coloring` reads `PredInstance_SAT` and `PredInstance_FoMa`. If the input uses `PredInstance_FM`, it is accepted as the FoMa alias and produces `coloring_foma`. The SAT default produces `coloring_id_sat`.
 
 ```bash
 docker run --rm --cpus=10 --memory=50g -v /path/to/data:/data 3dtrees_potree \
-  --source /data/input.laz \
-  --outdir /data/potree \
-  --special-coloring
+  python /src/run.py \
+  --source /data/input_segmented.laz \
+  --outdir /data/output \
+  --special-coloring \
+  --special-coloring-sidecar-json
 ```
 
 Custom attributes may be repeated or comma-separated:
 
 ```bash
 docker run --rm -v /path/to/data:/data 3dtrees_potree \
-  --source /data/input.laz \
-  --outdir /data/potree \
+  python /src/run.py \
+  --source /data/input_segmented.laz \
+  --outdir /data/output \
   --special-coloring \
   --special-coloring-instance-attributes PredInstance_SAT,PredInstance_FM
 ```
 
+This adds one coloring dimension per requested instance attribute to the generated Potree point cloud. When `--special-coloring-sidecar-json` is set, the tool writes mapping JSON files to the output directory, copies them beside generated `metadata.json` files for frontend discovery, and patches generated Potree HTML viewers to use the first sidecar color mapping. Instance values equal to the ground ID, and negative instance values such as `-1`, map to coloring ID `0`.
+
+Built-in special coloring palettes are `sky`, `sea`, `cozy`, `fairy`, `winter`, `rainbow`, `pastel`, `candy`, and `boring`.
+
 ### View Help
 
 ```bash
-docker run --rm 3dtrees_potree --help
+docker run --rm 3dtrees_potree python /src/run.py --help
 ```
 
 ## Project Structure
@@ -154,8 +167,9 @@ docker run --rm 3dtrees_potree --help
 ├── Dockerfile              # Docker image definition
 ├── src/
 │   ├── parameters.py       # Pydantic parameter definitions
-│   ├── special_coloring.py # Instance coloring preprocessing
-│   └── run.py             # Main execution script
+│   ├── run.py              # Main execution script
+│   └── special_coloring.py # Instance coloring preprocessing
+├── tests/                  # Unit tests for wrapper logic
 └── README.md              # This file
 ```
 
@@ -163,7 +177,7 @@ docker run --rm 3dtrees_potree --help
 
 1. **parameters.py** - Defines all PotreeConverter parameters using Pydantic's `BaseSettings` class with CLI argument parsing
 2. **run.py** - Parses CLI arguments, builds the PotreeConverter command, and executes it via subprocess
-3. **Dockerfile** - Creates a slim image with Python 3.11, PotreeConverter binary, and Python dependencies
+3. **Dockerfile** - Creates a slim image with Python 3.11, PotreeConverter binary, and Python dependencies. The image intentionally leaves entrypoint control to callers so Galaxy can launch its generated shell script.
 
 ## Performance
 
@@ -181,6 +195,9 @@ PotreeConverter 2.0 produces:
 - Octree LOD structure for efficient streaming
 - Compatible with Potree 1.7+ viewer
 - Optional web page with embedded viewer
+
+With `--special-coloring-sidecar-json`, the output directory also contains:
+- **special_coloring_mapping*.json**: Mapping from coloring IDs to RGB/hex colors and from each instance attribute to its coloring IDs
 
 ## Requirements
 
