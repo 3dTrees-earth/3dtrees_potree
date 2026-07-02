@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 INSTANCE_ATTRIBUTE = "PredInstance"
 COLOR_ATTRIBUTE = "coloring_id"
+DEFAULT_INSTANCE_ATTRIBUTES = ("PredInstance_SAT", "PredInstance_FoMa")
 COLOR_ATTRIBUTE_DTYPE = np.uint16
 GROUND_INSTANCE_ID = 0
 GROUND_COLORING_ID = 0
@@ -24,6 +26,14 @@ N_COLORS = 10
 N_NEIGHBORS = 10
 RANDOM_SEED = 0
 CHUNK_SIZE = 2_000_000
+POTREE_ATTRIBUTE_ALIASES = {
+    "return_number": "return number",
+    "number_of_returns": "number of returns",
+    "scan_angle": "scan angle",
+    "point_source_id": "point source id",
+    "gps_time": "gps-time",
+    "user_data": "user data",
+}
 
 PALETTES = {
     "sky": ["#f2c13a", "#ef7239", "#f23184", "#955ae8", "#5c96f5"],
@@ -67,9 +77,17 @@ class InstanceStats:
 @dataclass
 class SpecialColoringResult:
     sources: List[str]
-    mapping_path: Path
+    mapping_paths: List[Path]
     source_files: List[Path]
-    instance_count: int
+    instance_counts: Dict[str, int]
+    output_attributes: List[str]
+
+
+@dataclass(frozen=True)
+class ColoringSpec:
+    instance_attribute: str
+    color_attribute: str
+    mapping_path: Path
 
 
 PotreeCommandBuilder = Callable[[Sequence[str], Sequence[str]], List[str]]
@@ -81,7 +99,7 @@ def run_special_coloring_conversion(
     sources: Sequence[str],
     outdir: Path,
     attributes: Sequence[str],
-    instance_attribute: str,
+    instance_attributes: Sequence[str],
     palette_name: str,
     n_colors: int,
     n_neighbors: int,
@@ -94,15 +112,14 @@ def run_special_coloring_conversion(
 ) -> str:
     outdir.parent.mkdir(parents=True, exist_ok=True)
     if attributes:
-        logger.info("Ignoring --attributes because --special-coloring uses PotreeConverter defaults.")
+        logger.info("Ignoring --attributes because --special-coloring preserves input dimensions automatically.")
 
     with tempfile.TemporaryDirectory(prefix="potree_special_coloring_", dir=str(outdir.parent)) as tmp_dir:
-        mapping_path = outdir / "special_coloring_mapping.json"
         result = prepare_special_coloring_inputs(
             sources,
             Path(tmp_dir),
-            mapping_path,
-            instance_attribute=instance_attribute,
+            outdir,
+            instance_attributes=instance_attributes,
             palette_name=palette_name,
             n_colors=n_colors,
             n_neighbors=n_neighbors,
@@ -111,25 +128,26 @@ def run_special_coloring_conversion(
             write_sidecar_json=write_sidecar_json,
         )
         logger.info(
-            "Special coloring prepared %s input file(s), %s non-ground instance(s), "
-            "instance_attribute=%s, palette=%s, n_colors=%s, n_neighbors=%s, ground_id=%s, sidecar_json=%s, mapping=%s",
+            "Special coloring prepared %s input file(s), instance_counts=%s, "
+            "instance_attributes=%s, palette=%s, n_colors=%s, n_neighbors=%s, ground_id=%s, sidecar_json=%s, mappings=%s",
             len(result.source_files),
-            result.instance_count,
-            instance_attribute,
+            result.instance_counts,
+            list(result.instance_counts),
             palette_name,
             n_colors,
             n_neighbors,
             ground_instance_id,
             write_sidecar_json,
-            result.mapping_path if write_sidecar_json else None,
+            result.mapping_paths if write_sidecar_json else None,
         )
-        command = build_command(result.sources, [])
+        command = build_command(result.sources, result.output_attributes)
         stdout = run_command(command)
         if write_sidecar_json:
-            for copied_path in copy_mapping_to_metadata_siblings(outdir, mapping_path):
-                logger.info("Copied special coloring mapping beside metadata: %s", copied_path)
+            for mapping_path in result.mapping_paths:
+                for copied_path in copy_mapping_to_metadata_siblings(outdir, mapping_path):
+                    logger.info("Copied special coloring mapping beside metadata: %s", copied_path)
             if generate_page:
-                patched_html = patch_special_coloring_viewer_html(outdir, generate_page, mapping_path.name)
+                patched_html = patch_special_coloring_viewer_html(outdir, generate_page, result.mapping_paths[0].name)
                 if patched_html:
                     logger.info("Patched generated viewer for special coloring sidecar: %s", patched_html)
         return stdout
@@ -287,9 +305,9 @@ SPECIAL_COLORING_VIEWER_HELPER = """
 def prepare_special_coloring_inputs(
     sources: Sequence[str],
     working_dir: Path,
-    mapping_path: Path,
+    outdir: Path,
     *,
-    instance_attribute: str = INSTANCE_ATTRIBUTE,
+    instance_attributes: Sequence[str] = DEFAULT_INSTANCE_ATTRIBUTES,
     palette_name: str = PALETTE_NAME,
     n_colors: int = N_COLORS,
     n_neighbors: int = N_NEIGHBORS,
@@ -299,11 +317,10 @@ def prepare_special_coloring_inputs(
     chunk_size: int = CHUNK_SIZE,
     write_sidecar_json: bool = True,
 ) -> SpecialColoringResult:
-    """Create temporary LAS/LAZ inputs with a coloring_id extra dimension."""
+    """Create temporary LAS/LAZ inputs with one coloring dimension per instance attribute."""
     palette_name = normalize_palette_name(palette_name)
     ground_color = normalize_hex_color(ground_color)
-    validate_special_coloring_options(
-        instance_attribute=instance_attribute,
+    validate_common_special_coloring_options(
         palette_name=palette_name,
         n_colors=n_colors,
         n_neighbors=n_neighbors,
@@ -313,58 +330,74 @@ def prepare_special_coloring_inputs(
     if not source_files:
         raise ValueError("No LAS/LAZ files found for special coloring.")
 
-    instance_stats = accumulate_instance_stats(
-        source_files,
-        instance_attribute=instance_attribute,
-        ground_instance_id=ground_instance_id,
-        chunk_size=chunk_size,
-    )
-    instance_to_coloring_id, coloring_id_to_color = assign_coloring_ids(
-        instance_stats,
-        n_colors=n_colors,
-        n_neighbors=n_neighbors,
-        palette_name=palette_name,
-        seed=seed,
-        ground_instance_id=ground_instance_id,
-        ground_color=ground_color,
-    )
-
-    if write_sidecar_json:
-        mapping_path.parent.mkdir(parents=True, exist_ok=True)
-        write_mapping_json(
-            mapping_path,
-            instance_to_coloring_id,
-            coloring_id_to_color,
-            instance_attribute=instance_attribute,
-            palette_name=palette_name,
-            n_colors=n_colors,
-            n_neighbors=n_neighbors,
-            ground_instance_id=ground_instance_id,
-            ground_color=ground_color,
-        )
-
-    colored_dir = working_dir / "special_coloring_inputs"
-    colored_dir.mkdir(parents=True, exist_ok=True)
-    for index, source_file in enumerate(source_files):
-        target = colored_dir / f"{index:04d}_{regular_laz_name(source_file)}"
-        write_colored_las(
-            source_file,
-            target,
-            instance_to_coloring_id,
-            instance_attribute=instance_attribute,
+    specs = build_coloring_specs(source_files, outdir, instance_attributes)
+    mappings: Dict[str, Tuple[Dict[int, int], Dict[int, Dict[str, object]]]] = {}
+    instance_counts: Dict[str, int] = {}
+    for spec in specs:
+        instance_stats = accumulate_instance_stats(
+            source_files,
+            instance_attribute=spec.instance_attribute,
             ground_instance_id=ground_instance_id,
             chunk_size=chunk_size,
         )
-
-    return SpecialColoringResult(
-        sources=[str(colored_dir)],
-        mapping_path=mapping_path,
-        source_files=source_files,
-        instance_count=sum(
+        instance_to_coloring_id, coloring_id_to_color = assign_coloring_ids(
+            instance_stats,
+            n_colors=n_colors,
+            n_neighbors=n_neighbors,
+            palette_name=palette_name,
+            seed=seed,
+            ground_instance_id=ground_instance_id,
+            ground_color=ground_color,
+        )
+        mappings[spec.instance_attribute] = (instance_to_coloring_id, coloring_id_to_color)
+        instance_counts[spec.instance_attribute] = sum(
             1
             for instance_id in instance_to_coloring_id
             if not is_ground_instance_id(instance_id, ground_instance_id)
-        ),
+        )
+
+        if write_sidecar_json:
+            spec.mapping_path.parent.mkdir(parents=True, exist_ok=True)
+            write_mapping_json(
+                spec.mapping_path,
+                instance_to_coloring_id,
+                coloring_id_to_color,
+                instance_attribute=spec.instance_attribute,
+                color_attribute=spec.color_attribute,
+                palette_name=palette_name,
+                n_colors=n_colors,
+                n_neighbors=n_neighbors,
+                ground_instance_id=ground_instance_id,
+                ground_color=ground_color,
+            )
+
+    colored_dir = working_dir / "special_coloring_inputs"
+    colored_dir.mkdir(parents=True, exist_ok=True)
+    output_attributes: List[str] = []
+    for index, source_file in enumerate(source_files):
+        target = colored_dir / f"{index:04d}_{regular_laz_name(source_file)}"
+        source_attributes = write_colored_las(
+            source_file,
+            target,
+            specs,
+            mappings,
+            ground_instance_id=ground_instance_id,
+            chunk_size=chunk_size,
+        )
+        if not output_attributes:
+            output_attributes = [
+                potree_attribute_name(name)
+                for name in source_attributes
+                if name not in {"X", "Y", "Z"}
+            ]
+            output_attributes.extend(spec.color_attribute for spec in specs)
+
+    return SpecialColoringResult(
+        sources=[str(colored_dir)],
+        mapping_paths=[spec.mapping_path for spec in specs],
+        source_files=source_files,
+        instance_counts=instance_counts,
+        output_attributes=output_attributes,
     )
 
 
@@ -383,6 +416,129 @@ def discover_pointcloud_files(sources: Sequence[str]) -> List[Path]:
         elif path.is_file() and path.suffix.lower() in {".las", ".laz"}:
             files.append(path)
     return files
+
+
+def build_coloring_specs(
+    source_files: Sequence[Path],
+    outdir: Path,
+    requested_instance_attributes: Sequence[str],
+) -> List[ColoringSpec]:
+    attributes = normalize_instance_attributes(requested_instance_attributes)
+    if not attributes:
+        raise ValueError("At least one special coloring instance attribute is required.")
+
+    first_header_dimensions = read_dimension_names(source_files[0])
+    resolved_attributes = [
+        resolve_instance_attribute_name(attribute, first_header_dimensions)
+        for attribute in attributes
+    ]
+    seen_resolved = set()
+    duplicate_resolved = []
+    for attribute in resolved_attributes:
+        key = attribute.lower()
+        if key in seen_resolved:
+            duplicate_resolved.append(attribute)
+        seen_resolved.add(key)
+    if duplicate_resolved:
+        raise ValueError(f"Duplicate special coloring instance attributes after alias resolution: {duplicate_resolved}")
+
+    for source_file in source_files[1:]:
+        dimensions = read_dimension_names(source_file)
+        for attribute in resolved_attributes:
+            if attribute not in dimensions:
+                raise ValueError(f"{source_file} does not contain required dimension {attribute!r}.")
+
+    color_attributes = build_color_attribute_names(resolved_attributes)
+    existing = {name.lower() for name in first_header_dimensions}
+    collisions = [name for name in color_attributes if name.lower() in existing]
+    if collisions:
+        raise ValueError(f"Source already contains special coloring output dimension(s): {collisions}")
+
+    return [
+        ColoringSpec(
+            instance_attribute=instance_attribute,
+            color_attribute=color_attribute,
+            mapping_path=outdir / mapping_filename(color_attribute, len(color_attributes) == 1),
+        )
+        for instance_attribute, color_attribute in zip(resolved_attributes, color_attributes)
+    ]
+
+
+def normalize_instance_attributes(values: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    for value in values or DEFAULT_INSTANCE_ATTRIBUTES:
+        for part in str(value).split(","):
+            attribute = part.strip()
+            key = attribute.lower()
+            if attribute and key not in seen:
+                seen.add(key)
+                normalized.append(attribute)
+    return normalized
+
+
+def read_dimension_names(source_file: Path) -> List[str]:
+    with laspy.open(str(source_file), **_open_kwargs(source_file)) as reader:
+        return list(reader.header.point_format.dimension_names)
+
+
+def resolve_instance_attribute_name(attribute: str, dimensions: Sequence[str]) -> str:
+    dimension_by_lower = {name.lower(): name for name in dimensions}
+    direct = dimension_by_lower.get(attribute.lower())
+    if direct:
+        return direct
+
+    aliases = []
+    lower = attribute.lower()
+    if lower.endswith("_foma"):
+        aliases.append(f"{attribute[:-5]}_FM")
+    elif lower.endswith("_fm"):
+        aliases.append(f"{attribute[:-3]}_FoMa")
+
+    for alias in aliases:
+        resolved = dimension_by_lower.get(alias.lower())
+        if resolved:
+            logger.info("Using %s for requested special coloring attribute %s", resolved, attribute)
+            return resolved
+
+    raise ValueError(f"{attribute!r} is not present in the input dimensions: {sorted(dimensions)}")
+
+
+def build_color_attribute_names(instance_attributes: Sequence[str]) -> List[str]:
+    names: List[str] = []
+    seen = set()
+    for index, attribute in enumerate(instance_attributes, start=1):
+        base = color_attribute_name_for_instance(attribute, index)
+        name = base
+        suffix = 2
+        while name.lower() in seen:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        seen.add(name.lower())
+        names.append(name)
+    return names
+
+
+def color_attribute_name_for_instance(attribute: str, index: int) -> str:
+    suffix = attribute.rsplit("_", 1)[1] if "_" in attribute else ""
+    suffix_key = re.sub(r"[^a-z0-9]+", "", suffix.lower())
+    if suffix_key == "sat":
+        return "coloring_id_sat"
+    if suffix_key in {"fm", "foma"}:
+        return "coloring_foma"
+    if suffix_key:
+        return f"coloring_id_{suffix_key}"
+    return f"coloring_id{index}"
+
+
+def mapping_filename(color_attribute: str, single_mapping: bool) -> str:
+    if single_mapping:
+        return "special_coloring_mapping.json"
+    return f"special_coloring_mapping_{color_attribute}.json"
+
+
+def potree_attribute_name(las_attribute_name: str) -> str:
+    return POTREE_ATTRIBUTE_ALIASES.get(las_attribute_name, las_attribute_name)
 
 
 def regular_laz_name(source_file: Path) -> str:
@@ -541,32 +697,43 @@ def nearest_neighbors(coords: np.ndarray, n_neighbors: int) -> Tuple[np.ndarray,
 def write_colored_las(
     source_file: Path,
     target_file: Path,
-    instance_to_coloring_id: Mapping[int, int],
+    specs: Sequence[ColoringSpec],
+    mappings: Mapping[str, Tuple[Mapping[int, int], Mapping[int, Mapping[str, object]]]],
     *,
-    instance_attribute: str = INSTANCE_ATTRIBUTE,
     ground_instance_id: int = GROUND_INSTANCE_ID,
     chunk_size: int = CHUNK_SIZE,
-) -> None:
+) -> List[str]:
     target_file.parent.mkdir(parents=True, exist_ok=True)
     with laspy.open(str(source_file), **_open_kwargs(source_file)) as reader:
-        _require_dimension(reader.header, instance_attribute, source_file)
-        _reject_existing_dimension(reader.header, COLOR_ATTRIBUTE, source_file)
+        for spec in specs:
+            _require_dimension(reader.header, spec.instance_attribute, source_file)
+            _reject_existing_dimension(reader.header, spec.color_attribute, source_file)
 
         source_dimensions = list(reader.header.point_format.dimension_names)
-        output_header = build_colored_header(reader.header, instance_attribute=instance_attribute)
-        output_header.add_extra_dim(
-            laspy.ExtraBytesParams(
-                name=COLOR_ATTRIBUTE,
-                type=COLOR_ATTRIBUTE_DTYPE,
-                description="Julian special coloring id",
-            )
+        output_header = build_colored_header(
+            reader.header,
+            instance_attributes=[spec.instance_attribute for spec in specs],
+        )
+        output_header.add_extra_dims(
+            [
+                laspy.ExtraBytesParams(
+                    name=spec.color_attribute,
+                    type=COLOR_ATTRIBUTE_DTYPE,
+                    description="Special coloring id",
+                )
+                for spec in specs
+            ]
         )
 
-        mapping_keys = np.array(sorted(instance_to_coloring_id.keys()), dtype=np.int64)
-        mapping_values = np.array(
-            [instance_to_coloring_id[int(key)] for key in mapping_keys],
-            dtype=COLOR_ATTRIBUTE_DTYPE,
-        )
+        mapping_arrays = {}
+        for spec in specs:
+            instance_to_coloring_id = mappings[spec.instance_attribute][0]
+            mapping_keys = np.array(sorted(instance_to_coloring_id.keys()), dtype=np.int64)
+            mapping_values = np.array(
+                [instance_to_coloring_id[int(key)] for key in mapping_keys],
+                dtype=COLOR_ATTRIBUTE_DTYPE,
+            )
+            mapping_arrays[spec.instance_attribute] = (mapping_keys, mapping_values)
 
         with laspy.open(
             str(target_file),
@@ -578,24 +745,28 @@ def write_colored_las(
             for chunk in reader.chunk_iterator(chunk_size):
                 out_record = laspy.ScaleAwarePointRecord.zeros(len(chunk), header=output_header)
                 for dim_name in source_dimensions:
-                    if dim_name == instance_attribute:
+                    if any(dim_name == spec.instance_attribute for spec in specs):
                         out_record[dim_name] = _coerce_instance_ids(chunk[dim_name]).astype(np.int32)
                     else:
                         out_record[dim_name] = chunk[dim_name]
-                out_record[COLOR_ATTRIBUTE] = map_instances_to_coloring_ids(
-                    chunk[instance_attribute],
-                    mapping_keys,
-                    mapping_values,
-                    instance_attribute=instance_attribute,
-                    ground_instance_id=ground_instance_id,
-                )
+                for spec in specs:
+                    mapping_keys, mapping_values = mapping_arrays[spec.instance_attribute]
+                    out_record[spec.color_attribute] = map_instances_to_coloring_ids(
+                        chunk[spec.instance_attribute],
+                        mapping_keys,
+                        mapping_values,
+                        instance_attribute=spec.instance_attribute,
+                        ground_instance_id=ground_instance_id,
+                    )
                 writer.write_points(out_record)
+
+    return source_dimensions
 
 
 def build_colored_header(
     source_header: laspy.LasHeader,
     *,
-    instance_attribute: str = INSTANCE_ATTRIBUTE,
+    instance_attributes: Sequence[str] = (INSTANCE_ATTRIBUTE,),
 ) -> laspy.LasHeader:
     output_header = laspy.LasHeader(
         point_format=source_header.point_format.id,
@@ -614,13 +785,14 @@ def build_colored_header(
         output_header.vlrs.append(vlr)
 
     extra_params = []
+    instance_attribute_set = set(instance_attributes)
     for dim in source_header.point_format.extra_dimensions:
-        dim_type = np.int32 if dim.name == instance_attribute else dim.dtype
+        dim_type = np.int32 if dim.name in instance_attribute_set else dim.dtype
         extra_params.append(
             laspy.ExtraBytesParams(
                 name=dim.name,
                 type=dim_type,
-                description=getattr(dim, "description", "") or "",
+                description="",
                 offsets=getattr(dim, "offsets", None),
                 scales=getattr(dim, "scales", None),
                 no_data=getattr(dim, "no_data", None),
@@ -673,6 +845,7 @@ def write_mapping_json(
     coloring_id_to_color: Mapping[int, Mapping[str, object]],
     *,
     instance_attribute: str = INSTANCE_ATTRIBUTE,
+    color_attribute: str = COLOR_ATTRIBUTE,
     palette_name: str = PALETTE_NAME,
     n_colors: int = N_COLORS,
     n_neighbors: int = N_NEIGHBORS,
@@ -682,7 +855,7 @@ def write_mapping_json(
     payload = {
         "version": 1,
         "instance_attribute": instance_attribute,
-        "color_attribute": COLOR_ATTRIBUTE,
+        "color_attribute": color_attribute,
         "ground_instance_id": ground_instance_id,
         "ground_coloring_id": GROUND_COLORING_ID,
         "ground_color": normalize_hex_color(ground_color),
@@ -724,16 +897,13 @@ def build_palette(
     return [rgb01_to_hex(color) for color in rgb], rgb, lab
 
 
-def validate_special_coloring_options(
+def validate_common_special_coloring_options(
     *,
-    instance_attribute: str,
     palette_name: str,
     n_colors: int,
     n_neighbors: int,
     ground_color: str,
 ) -> None:
-    if not instance_attribute.strip():
-        raise ValueError("special coloring instance attribute must not be empty.")
     if n_colors < 1:
         raise ValueError("special coloring n_colors must be at least 1.")
     if n_neighbors < 1:

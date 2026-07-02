@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
@@ -13,6 +14,7 @@ from special_coloring import run_special_coloring_conversion
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+POTREE_CONVERTER = "/opt/PotreeConverter/PotreeConverter"
 
 BOOLEAN_FLAGS = {
     "--keep-chunks",
@@ -47,13 +49,19 @@ def normalize_attributes(attributes: Optional[Iterable[str]]) -> List[str]:
     return normalized
 
 
+def resolve_special_coloring_instance_attributes(params: Parameters) -> List[str]:
+    if params.special_coloring_instance_attribute:
+        return normalize_attributes([params.special_coloring_instance_attribute])
+    return normalize_attributes(params.special_coloring_instance_attributes)
+
+
 def build_potree_command(
     params: Parameters,
     *,
     sources: Optional[Sequence[str]] = None,
     attributes: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    command = ["/opt/PotreeConverter/PotreeConverter", *(sources or params.source)]
+    command = [POTREE_CONVERTER, *(sources or params.source)]
     if params.outdir:
         command.extend(["-o", str(params.outdir)])
     if params.encoding != "DEFAULT":
@@ -70,15 +78,35 @@ def build_potree_command(
         command.append("--no-chunking")
     if params.no_indexing:
         command.append("--no-indexing")
-    if params.numthreads > 0:
+    if params.numthreads > 0 and converter_supports_argument("--numthreads"):
         command.extend(["--numthreads", str(params.numthreads)])
-    if params.grid_size > 0:
+    elif params.numthreads > 0:
+        logger.warning("Ignoring --numthreads because this PotreeConverter binary does not support it.")
+    if params.grid_size > 0 and converter_supports_argument("--grid-size"):
         command.extend(["--grid-size", str(params.grid_size)])
+    elif params.grid_size > 0:
+        logger.warning("Ignoring --grid-size because this PotreeConverter binary does not support it.")
     if params.generate_page:
         command.extend(["-p", params.generate_page])
     if params.title:
         command.extend(["--title", params.title])
     return command
+
+
+@lru_cache(maxsize=1)
+def potree_converter_help() -> str:
+    result = subprocess.run(
+        [POTREE_CONVERTER, "--help"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return result.stdout
+
+
+def converter_supports_argument(argument: str) -> bool:
+    return argument in potree_converter_help()
 
 
 def run_command(command: Sequence[str]) -> str:
@@ -101,7 +129,7 @@ def run(params: Parameters) -> str:
         sources=params.source,
         outdir=params.outdir,
         attributes=params.attributes,
-        instance_attribute=params.special_coloring_instance_attribute,
+        instance_attributes=resolve_special_coloring_instance_attributes(params),
         palette_name=params.special_coloring_palette,
         n_colors=params.special_coloring_n_colors,
         n_neighbors=params.special_coloring_n_neighbors,

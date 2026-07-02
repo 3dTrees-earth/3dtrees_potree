@@ -45,7 +45,7 @@ class Parameters(BaseSettings):
 
     special_coloring: bool = Field(
         False,
-        description="Add Julian-style instance coloring as a coloring_id extra dimension before conversion",
+        description="Add Julian-style instance coloring extra dimensions before conversion",
         alias=AliasChoices("special-coloring", "special_coloring")
     )
 
@@ -69,9 +69,20 @@ class Parameters(BaseSettings):
         alias=AliasChoices("special-coloring-n-neighbors", "special_coloring_n_neighbors")
     )
 
-    special_coloring_instance_attribute: str = Field(
-        "PredInstance",
-        description="Point attribute containing instance IDs for special coloring",
+    special_coloring_instance_attributes: List[str] = Field(
+        default_factory=lambda: ["PredInstance_SAT", "PredInstance_FoMa"],
+        description="Point attributes containing instance IDs for special coloring",
+        alias=AliasChoices(
+            "special-coloring-instance-attributes",
+            "special_coloring_instance_attributes",
+            "special-coloring-instance-ids",
+            "special_coloring_instance_ids",
+        )
+    )
+
+    special_coloring_instance_attribute: Optional[str] = Field(
+        None,
+        description="Single point attribute containing instance IDs for special coloring",
         alias=AliasChoices("special-coloring-instance-attribute", "special_coloring_instance_attribute", "special-coloring-instance-id", "special_coloring_instance_id")
     )
 

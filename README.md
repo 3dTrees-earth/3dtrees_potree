@@ -15,7 +15,7 @@ PotreeConverter generates an octree LOD structure for streaming and real-time re
 - ✅ **Multiple parameter aliases** - Supports both Python-style (`--output_dir`) and CLI-style (`--output-dir`) naming
 - ✅ **Slim Docker image** - ~200-250MB using Python 3.11-slim base
 - ✅ **Pre-built binary** - Uses official PotreeConverter 2.1.1 release from GitHub
-- ✅ **Special instance coloring** - Adds optional neighbor-aware `coloring_id` values while preserving source RGB
+- ✅ **Multi-attribute special coloring** - Adds optional neighbor-aware coloring dimensions while preserving source RGB
 - ✅ **Comprehensive logging** - Detailed execution logs with timestamps
 
 ## Quick Start
@@ -56,11 +56,12 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 | `--method` | `-m` | str | `poisson` | Sampling method: `poisson`, `poisson_average`, `random` |
 | `--chunk-method` | | str | `LASZIP` | Chunking method |
 | `--attributes` | | List[str] | `[]` | Attributes in output file |
-| `--special-coloring` | | bool | `False` | Add a `coloring_id` extra dimension from `PredInstance` |
+| `--special-coloring` | | bool | `False` | Add instance-based coloring dimensions before conversion |
 | `--special-coloring-palette` | | str | `candy` | Palette name or comma-separated `#RRGGBB` colors for special coloring |
 | `--special-coloring-n-colors` | | int | `10` | Number of non-ground coloring IDs |
 | `--special-coloring-n-neighbors` | | int | `10` | Number of nearest instance centroids used to avoid nearby color collisions |
-| `--special-coloring-instance-attribute` | | str | `PredInstance` | Point attribute containing instance IDs |
+| `--special-coloring-instance-attributes` | | List[str] | `PredInstance_SAT`, `PredInstance_FoMa` | Instance attributes to color; comma-separated or repeated values are supported |
+| `--special-coloring-instance-attribute` | | str | `None` | Backward-compatible single instance attribute override |
 | `--special-coloring-ground-id` | | int | `0` | Instance ID treated as ground/background; negative instance IDs are also treated as background |
 | `--special-coloring-ground-color` | | str | `#808080` | Ground/background color |
 | `--special-coloring-sidecar-json` | | bool | `False` | Write `special_coloring_mapping.json` and patch generated Potree HTML viewers to use it |
@@ -127,10 +128,10 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ### With Special Instance Coloring
 
-Preserve original RGB while adding a display-only `coloring_id` attribute based on the `PredInstance` extra dimension:
+Preserve original RGB while adding display-only coloring attributes based on instance extra dimensions. By default, `--special-coloring` reads `PredInstance_SAT` and `PredInstance_FoMa`. If the input uses `PredInstance_FM`, it is accepted as the FoMa alias and produces `coloring_foma`. The SAT default produces `coloring_id_sat`.
 
 ```bash
-docker run --rm -v /path/to/data:/data 3dtrees_potree \
+docker run --rm --cpus=10 --memory=50g -v /path/to/data:/data 3dtrees_potree \
   python /src/run.py \
   --source /data/input_segmented.laz \
   --outdir /data/output \
@@ -138,9 +139,18 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
   --special-coloring-sidecar-json
 ```
 
-This adds `coloring_id` to the generated Potree point cloud and does not pass any `--attributes` arguments to PotreeConverter.
-When `--special-coloring-sidecar-json` is set, the tool writes `special_coloring_mapping.json` to the output directory, copies it beside generated `metadata.json` files for frontend discovery, and patches generated Potree HTML viewers to use those sidecar colors for `coloring_id`.
-`PredInstance` values equal to the ground ID, and negative `PredInstance` values such as `-1`, map to `coloring_id = 0`.
+Custom attributes may be repeated or comma-separated:
+
+```bash
+docker run --rm -v /path/to/data:/data 3dtrees_potree \
+  python /src/run.py \
+  --source /data/input_segmented.laz \
+  --outdir /data/output \
+  --special-coloring \
+  --special-coloring-instance-attributes PredInstance_SAT,PredInstance_FM
+```
+
+This adds one coloring dimension per requested instance attribute to the generated Potree point cloud. When `--special-coloring-sidecar-json` is set, the tool writes mapping JSON files to the output directory, copies them beside generated `metadata.json` files for frontend discovery, and patches generated Potree HTML viewers to use the first sidecar color mapping. Instance values equal to the ground ID, and negative instance values such as `-1`, map to coloring ID `0`.
 
 Built-in special coloring palettes are `sky`, `sea`, `cozy`, `fairy`, `winter`, `rainbow`, `pastel`, `candy`, and `boring`.
 
@@ -187,7 +197,7 @@ PotreeConverter 2.0 produces:
 - Optional web page with embedded viewer
 
 With `--special-coloring-sidecar-json`, the output directory also contains:
-- **special_coloring_mapping.json**: Mapping from `coloring_id` to RGB/hex colors and from `PredInstance` to `coloring_id`
+- **special_coloring_mapping*.json**: Mapping from coloring IDs to RGB/hex colors and from each instance attribute to its coloring IDs
 
 ## Requirements
 
