@@ -128,7 +128,7 @@ docker run --rm -v /path/to/data:/data 3dtrees_potree \
 
 ### With Special Instance Coloring
 
-Preserve original RGB while adding display-only coloring attributes based on instance extra dimensions. By default, `--special-coloring` reads `PredInstance_SAT` and `PredInstance_FoMa`. If the input uses `PredInstance_FM`, it is accepted as the FoMa alias and produces `coloring_foma`. The SAT default produces `coloring_id_sat`.
+Preserve original RGB while adding display-only coloring attributes based on instance extra dimensions. By default, `--special-coloring` reads `PredInstance_SAT` and `PredInstance_FoMa`. Bare `PredInstance` and `PredInstance_SAT` produce `coloring_id_sat`. If the input uses `PredInstance_FM`, it is accepted as the FoMa alias and produces `coloring_id_fm`.
 
 ```bash
 docker run --rm --cpus=10 --memory=50g -v /path/to/data:/data 3dtrees_potree \

@@ -26,14 +26,6 @@ N_COLORS = 10
 N_NEIGHBORS = 10
 RANDOM_SEED = 0
 CHUNK_SIZE = 2_000_000
-POTREE_ATTRIBUTE_ALIASES = {
-    "return_number": "return number",
-    "number_of_returns": "number of returns",
-    "scan_angle": "scan angle",
-    "point_source_id": "point source id",
-    "gps_time": "gps-time",
-    "user_data": "user data",
-}
 
 PALETTES = {
     "sky": ["#f2c13a", "#ef7239", "#f23184", "#955ae8", "#5c96f5"],
@@ -373,10 +365,13 @@ def prepare_special_coloring_inputs(
 
     colored_dir = working_dir / "special_coloring_inputs"
     colored_dir.mkdir(parents=True, exist_ok=True)
+    # Let PotreeConverter derive the complete LAS layout itself. Passing a
+    # selective --attributes list can omit standard bytes such as scan_angle_rank
+    # while extra dimensions are still written after the full input layout.
     output_attributes: List[str] = []
     for index, source_file in enumerate(source_files):
         target = colored_dir / f"{index:04d}_{regular_laz_name(source_file)}"
-        source_attributes = write_colored_las(
+        write_colored_las(
             source_file,
             target,
             specs,
@@ -384,13 +379,6 @@ def prepare_special_coloring_inputs(
             ground_instance_id=ground_instance_id,
             chunk_size=chunk_size,
         )
-        if not output_attributes:
-            output_attributes = [
-                potree_attribute_name(name)
-                for name in source_attributes
-                if name not in {"X", "Y", "Z"}
-            ]
-            output_attributes.extend(spec.color_attribute for spec in specs)
 
     return SpecialColoringResult(
         sources=[str(colored_dir)],
@@ -522,10 +510,10 @@ def build_color_attribute_names(instance_attributes: Sequence[str]) -> List[str]
 def color_attribute_name_for_instance(attribute: str, index: int) -> str:
     suffix = attribute.rsplit("_", 1)[1] if "_" in attribute else ""
     suffix_key = re.sub(r"[^a-z0-9]+", "", suffix.lower())
-    if suffix_key == "sat":
+    if attribute.lower() == "predinstance" or suffix_key == "sat":
         return "coloring_id_sat"
     if suffix_key in {"fm", "foma"}:
-        return "coloring_foma"
+        return "coloring_id_fm"
     if suffix_key:
         return f"coloring_id_{suffix_key}"
     return f"coloring_id{index}"
@@ -535,10 +523,6 @@ def mapping_filename(color_attribute: str, single_mapping: bool) -> str:
     if single_mapping:
         return "special_coloring_mapping.json"
     return f"special_coloring_mapping_{color_attribute}.json"
-
-
-def potree_attribute_name(las_attribute_name: str) -> str:
-    return POTREE_ATTRIBUTE_ALIASES.get(las_attribute_name, las_attribute_name)
 
 
 def regular_laz_name(source_file: Path) -> str:
@@ -710,10 +694,7 @@ def write_colored_las(
             _reject_existing_dimension(reader.header, spec.color_attribute, source_file)
 
         source_dimensions = list(reader.header.point_format.dimension_names)
-        output_header = build_colored_header(
-            reader.header,
-            instance_attributes=[spec.instance_attribute for spec in specs],
-        )
+        output_header = build_colored_header(reader.header)
         output_header.add_extra_dims(
             [
                 laspy.ExtraBytesParams(
@@ -745,10 +726,7 @@ def write_colored_las(
             for chunk in reader.chunk_iterator(chunk_size):
                 out_record = laspy.ScaleAwarePointRecord.zeros(len(chunk), header=output_header)
                 for dim_name in source_dimensions:
-                    if any(dim_name == spec.instance_attribute for spec in specs):
-                        out_record[dim_name] = _coerce_instance_ids(chunk[dim_name]).astype(np.int32)
-                    else:
-                        out_record[dim_name] = chunk[dim_name]
+                    out_record[dim_name] = chunk[dim_name]
                 for spec in specs:
                     mapping_keys, mapping_values = mapping_arrays[spec.instance_attribute]
                     out_record[spec.color_attribute] = map_instances_to_coloring_ids(
@@ -765,8 +743,6 @@ def write_colored_las(
 
 def build_colored_header(
     source_header: laspy.LasHeader,
-    *,
-    instance_attributes: Sequence[str] = (INSTANCE_ATTRIBUTE,),
 ) -> laspy.LasHeader:
     output_header = laspy.LasHeader(
         point_format=source_header.point_format.id,
@@ -785,13 +761,11 @@ def build_colored_header(
         output_header.vlrs.append(vlr)
 
     extra_params = []
-    instance_attribute_set = set(instance_attributes)
     for dim in source_header.point_format.extra_dimensions:
-        dim_type = np.int32 if dim.name in instance_attribute_set else dim.dtype
         extra_params.append(
             laspy.ExtraBytesParams(
                 name=dim.name,
-                type=dim_type,
+                type=dim.dtype,
                 description="",
                 offsets=getattr(dim, "offsets", None),
                 scales=getattr(dim, "scales", None),
