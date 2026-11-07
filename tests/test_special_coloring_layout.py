@@ -10,7 +10,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from special_coloring import build_color_attribute_names, run_special_coloring_conversion
+from special_coloring import (
+    accumulate_instance_stats_by_attribute,
+    build_color_attribute_names,
+    run_special_coloring_conversion,
+)
 
 
 def write_segmented_las(path: Path) -> None:
@@ -121,6 +125,75 @@ class SpecialColoringLayoutTests(unittest.TestCase):
             self.assertEqual(stdout, "converted")
             self.assertEqual(captured["attributes"], [])
             self.assertNotIn("--attributes", captured["command"])
+
+    def test_converter_colors_instances_from_tables_without_rewriting_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            source_path = temp_path / "8120.las"
+            outdir = temp_path / "potree"
+            write_segmented_las(source_path)
+
+            captured: dict[str, object] = {}
+
+            def build_command(sources: list[str], attributes: list[str]) -> list[str]:
+                return ["PotreeConverter", *sources, "-o", str(outdir)]
+
+            def run_command(command: list[str]) -> str:
+                captured["command"] = list(command)
+                tables = [command[i + 1] for i, arg in enumerate(command) if arg == "--instance-coloring"]
+                captured["tables"] = {Path(path).name: Path(path).read_text().splitlines() for path in tables}
+                captured["written"] = sorted(path.name for path in temp_path.rglob("*.la[sz]"))
+                return "converted"
+
+            run_special_coloring_conversion(
+                sources=[str(source_path)],
+                outdir=outdir,
+                attributes=[],
+                instance_attributes=["PredInstance_SAT", "PredInstance_FM"],
+                palette_name="candy",
+                n_colors=10,
+                n_neighbors=2,
+                ground_instance_id=0,
+                ground_color="#808080",
+                write_sidecar_json=False,
+                generate_page=None,
+                build_command=build_command,
+                run_command=run_command,
+                converter_colors_instances=True,
+            )
+
+            self.assertEqual(captured["command"][1], str(source_path))
+            self.assertEqual(captured["written"], ["8120.las"])
+            sat = captured["tables"]["coloring_id_sat.txt"]
+            fm = captured["tables"]["coloring_id_fm.txt"]
+            self.assertEqual(sat[:3], ["source PredInstance_SAT", "target coloring_id_sat", "ground 0"])
+            self.assertEqual(fm[:3], ["source PredInstance_FM", "target coloring_id_fm", "ground 0"])
+            self.assertEqual({line.split()[0] for line in sat[3:]} - {"0"}, {"1", "2"})
+            self.assertEqual({line.split()[0] for line in fm[3:]} - {"0"}, {"5", "6"})
+
+    def test_parallel_instance_stats_match_a_single_reader(self) -> None:
+        for suffix in (".las", ".laz"):
+            with self.subTest(suffix=suffix):
+                self._check_parallel_instance_stats(suffix)
+
+    def _check_parallel_instance_stats(self, suffix: str) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / f"8120{suffix}"
+            write_segmented_las(source_path)
+            attributes = ["PredInstance_SAT", "PredInstance_FM"]
+
+            single = accumulate_instance_stats_by_attribute(
+                [source_path], instance_attributes=attributes, ground_instance_id=0, chunk_size=1, workers=1
+            )
+            parallel = accumulate_instance_stats_by_attribute(
+                [source_path], instance_attributes=attributes, ground_instance_id=0, chunk_size=1, workers=2
+            )
+
+            self.assertEqual(single, parallel)
+            self.assertEqual(single["PredInstance_SAT"][2].count, 2)
+            self.assertAlmostEqual(single["PredInstance_SAT"][2].sum_x, 1.0 + 3.0)
+            self.assertEqual(single["PredInstance_SAT"][0].count, 1)
+            self.assertEqual(single["PredInstance_SAT"][0].sum_x, 0.0)
 
 
 if __name__ == "__main__":

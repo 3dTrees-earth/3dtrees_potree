@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
+import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import laspy
+import lazrs
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -26,6 +30,12 @@ N_COLORS = 10
 N_NEIGHBORS = 10
 RANDOM_SEED = 0
 CHUNK_SIZE = 2_000_000
+# points one worker decodes at once when computing instance statistics (about 0.6 GB at 70 bytes per point)
+PIECE_POINTS = 8_000_000
+# LAS 1.4 point formats (COPC) can skip decoding the fields colouring does not use
+COLORING_DECOMPRESSION = (
+    lazrs.SELECTIVE_DECOMPRESS_XY_RETURNS_CHANNEL | lazrs.SELECTIVE_DECOMPRESS_Z | lazrs.SELECTIVE_DECOMPRESS_ALL_EXTRA_BYTES
+)
 
 PALETTES = {
     "sky": ["#f2c13a", "#ef7239", "#f23184", "#955ae8", "#5c96f5"],
@@ -73,6 +83,7 @@ class SpecialColoringResult:
     source_files: List[Path]
     instance_counts: Dict[str, int]
     output_attributes: List[str]
+    converter_arguments: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -101,6 +112,8 @@ def run_special_coloring_conversion(
     generate_page: Optional[str],
     build_command: PotreeCommandBuilder,
     run_command: PotreeCommandRunner,
+    converter_colors_instances: bool = False,
+    workers: int = 1,
 ) -> str:
     outdir.parent.mkdir(parents=True, exist_ok=True)
     if attributes:
@@ -118,6 +131,8 @@ def run_special_coloring_conversion(
             ground_instance_id=ground_instance_id,
             ground_color=ground_color,
             write_sidecar_json=write_sidecar_json,
+            converter_colors_instances=converter_colors_instances,
+            workers=workers,
         )
         logger.info(
             "Special coloring prepared %s input file(s), instance_counts=%s, "
@@ -132,7 +147,7 @@ def run_special_coloring_conversion(
             write_sidecar_json,
             result.mapping_paths if write_sidecar_json else None,
         )
-        command = build_command(result.sources, result.output_attributes)
+        command = build_command(result.sources, result.output_attributes) + result.converter_arguments
         stdout = run_command(command)
         if write_sidecar_json:
             for mapping_path in result.mapping_paths:
@@ -308,8 +323,15 @@ def prepare_special_coloring_inputs(
     seed: int = RANDOM_SEED,
     chunk_size: int = CHUNK_SIZE,
     write_sidecar_json: bool = True,
+    converter_colors_instances: bool = False,
+    workers: int = 1,
 ) -> SpecialColoringResult:
-    """Create temporary LAS/LAZ inputs with one coloring dimension per instance attribute."""
+    """Assign coloring ids per instance attribute.
+
+    With converter_colors_instances, PotreeConverter adds the coloring dimensions itself from
+    id tables, so the input is read once here and never rewritten. Otherwise create temporary
+    LAS/LAZ inputs with one coloring dimension per instance attribute.
+    """
     palette_name = normalize_palette_name(palette_name)
     ground_color = normalize_hex_color(ground_color)
     validate_common_special_coloring_options(
@@ -325,13 +347,15 @@ def prepare_special_coloring_inputs(
     specs = build_coloring_specs(source_files, outdir, instance_attributes)
     mappings: Dict[str, Tuple[Dict[int, int], Dict[int, Dict[str, object]]]] = {}
     instance_counts: Dict[str, int] = {}
+    stats_by_attribute = accumulate_instance_stats_by_attribute(
+        source_files,
+        instance_attributes=[spec.instance_attribute for spec in specs],
+        ground_instance_id=ground_instance_id,
+        chunk_size=chunk_size,
+        workers=workers,
+    )
     for spec in specs:
-        instance_stats = accumulate_instance_stats(
-            source_files,
-            instance_attribute=spec.instance_attribute,
-            ground_instance_id=ground_instance_id,
-            chunk_size=chunk_size,
-        )
+        instance_stats = stats_by_attribute[spec.instance_attribute]
         instance_to_coloring_id, coloring_id_to_color = assign_coloring_ids(
             instance_stats,
             n_colors=n_colors,
@@ -362,6 +386,27 @@ def prepare_special_coloring_inputs(
                 ground_instance_id=ground_instance_id,
                 ground_color=ground_color,
             )
+
+    if converter_colors_instances:
+        converter_arguments: List[str] = []
+        for spec in specs:
+            table_path = working_dir / f"{spec.color_attribute}.txt"
+            write_coloring_table(
+                table_path,
+                mappings[spec.instance_attribute][0],
+                instance_attribute=spec.instance_attribute,
+                color_attribute=spec.color_attribute,
+                ground_instance_id=ground_instance_id,
+            )
+            converter_arguments.extend(["--instance-coloring", str(table_path)])
+        return SpecialColoringResult(
+            sources=list(sources),
+            mapping_paths=[spec.mapping_path for spec in specs],
+            source_files=source_files,
+            instance_counts=instance_counts,
+            output_attributes=[],
+            converter_arguments=converter_arguments,
+        )
 
     colored_dir = working_dir / "special_coloring_inputs"
     colored_dir.mkdir(parents=True, exist_ok=True)
@@ -541,41 +586,195 @@ def accumulate_instance_stats(
     ground_instance_id: int = GROUND_INSTANCE_ID,
     chunk_size: int = CHUNK_SIZE,
 ) -> Dict[int, InstanceStats]:
-    stats: Dict[int, InstanceStats] = {}
+    return accumulate_instance_stats_by_attribute(
+        source_files,
+        instance_attributes=[instance_attribute],
+        ground_instance_id=ground_instance_id,
+        chunk_size=chunk_size,
+    )[instance_attribute]
+
+
+def accumulate_instance_stats_by_attribute(
+    source_files: Sequence[Path],
+    *,
+    instance_attributes: Sequence[str],
+    ground_instance_id: int = GROUND_INSTANCE_ID,
+    chunk_size: int = CHUNK_SIZE,
+    workers: int = 1,
+) -> Dict[str, Dict[int, InstanceStats]]:
+    """Read each file once for all instance attributes, decoding only coordinates and extra bytes.
+
+    Each file is split into pieces that worker processes decode on their own: runs of LAZ chunks
+    taken from the file's chunk table, or point ranges of an uncompressed LAS. Coordinates are
+    summed as raw integers, so the result does not depend on how the file was split.
+    """
+    tasks = []
     for source_file in source_files:
-        with laspy.open(str(source_file), **_open_kwargs(source_file)) as reader:
-            _require_dimension(reader.header, instance_attribute, source_file)
-            for chunk in reader.chunk_iterator(chunk_size):
-                ids = _coerce_instance_ids(chunk[instance_attribute])
-                if ids.size == 0:
-                    continue
-                ground_like = is_ground_instance_ids(ids, ground_instance_id)
-                ground_ids, ground_counts = np.unique(ids[ground_like], return_counts=True)
-                for instance_id, count in zip(ground_ids, ground_counts):
-                    stats.setdefault(int(instance_id), InstanceStats()).count += int(count)
+        with laspy.open(str(source_file)) as reader:
+            for instance_attribute in instance_attributes:
+                _require_dimension(reader.header, instance_attribute, source_file)
+        for piece in _file_pieces(source_file, max_points=PIECE_POINTS):
+            tasks.append((piece, list(instance_attributes), ground_instance_id, chunk_size))
 
-                non_ground = ~ground_like
-                if not np.any(non_ground):
-                    continue
+    if workers > 1 and len(tasks) > 1:
+        # numpy in each worker must not start its own thread pool on top of the workers
+        for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ.setdefault(variable, "1")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            partials = list(pool.map(_piece_instance_sums, tasks))
+    else:
+        partials = [_piece_instance_sums(task) for task in tasks]
 
-                ids = ids[non_ground]
-                xs = np.asarray(chunk.x, dtype=np.float64)[non_ground]
-                ys = np.asarray(chunk.y, dtype=np.float64)[non_ground]
-                zs = np.asarray(chunk.z, dtype=np.float64)[non_ground]
+    stats_by_attribute: Dict[str, Dict[int, InstanceStats]] = {attribute: {} for attribute in instance_attributes}
+    for source_file in source_files:
+        file_partials = [partial for task, partial in zip(tasks, partials) if task[0].path == str(source_file)]
+        if not file_partials:
+            continue
+        for instance_attribute in instance_attributes:
+            _add_file_sums(
+                stats_by_attribute[instance_attribute],
+                [partial[instance_attribute] for partial in file_partials],
+                file_partials[0]["scale_offset"],
+                ground_instance_id,
+            )
+    return stats_by_attribute
 
-                unique_ids, inverse = np.unique(ids, return_inverse=True)
-                counts = np.bincount(inverse)
-                sum_x = np.bincount(inverse, weights=xs)
-                sum_y = np.bincount(inverse, weights=ys)
-                sum_z = np.bincount(inverse, weights=zs)
 
-                for idx, instance_id in enumerate(unique_ids):
-                    stat = stats.setdefault(int(instance_id), InstanceStats())
-                    stat.count += int(counts[idx])
-                    stat.sum_x += float(sum_x[idx])
-                    stat.sum_y += float(sum_y[idx])
-                    stat.sum_z += float(sum_z[idx])
-    return stats
+@dataclass(frozen=True)
+class FilePiece:
+    """Part of a point cloud file that can be decoded without the rest of the file."""
+
+    path: str
+    byte_start: int
+    point_count: int
+    chunk_table: Optional[Tuple[Tuple[int, int], ...]] = None  # LAZ: (points, bytes) per chunk
+
+
+def _file_pieces(source_file: Path, *, max_points: int) -> List[FilePiece]:
+    with laspy.open(str(source_file)) as reader:
+        header = reader.header
+        laszip_vlrs = [vlr for vlr in header.vlrs if vlr.record_id == 22204]
+
+    if source_file.suffix.lower() != ".laz" or not laszip_vlrs:
+        record_size = header.point_format.size
+        return [
+            FilePiece(
+                str(source_file),
+                header.offset_to_point_data + start * record_size,
+                min(max_points, header.point_count - start),
+            )
+            for start in range(0, header.point_count, max_points)
+        ]
+
+    # Decode from the chunk table instead of seeking: laspy's seek returns wrong points in
+    # files with variable-size chunks such as COPC.
+    with open(source_file, "rb") as stream:
+        stream.seek(header.offset_to_point_data)
+        table = [list(entry) for entry in lazrs.read_chunk_table(stream, lazrs.LazVlr(laszip_vlrs[0].record_data_bytes()))]
+        byte_start = stream.tell()
+
+    # fixed-size chunk tables list the full chunk size for the last, shorter chunk too
+    excess = sum(points for points, _ in table) - header.point_count
+    if table and 0 < excess < table[-1][0]:
+        table[-1][0] -= excess
+    if sum(points for points, _ in table) != header.point_count:
+        raise ValueError(f"LAZ chunk table of {source_file} does not add up to {header.point_count} points.")
+
+    pieces: List[FilePiece] = []
+    run: List[Tuple[int, int]] = []
+    for point_count, byte_count in table:
+        if run and sum(points for points, _ in run) + point_count > max_points:
+            pieces.append(FilePiece(str(source_file), byte_start, sum(points for points, _ in run), tuple(run)))
+            byte_start += sum(size for _, size in run)
+            run = []
+        run.append((int(point_count), int(byte_count)))
+    if run:
+        pieces.append(FilePiece(str(source_file), byte_start, sum(points for points, _ in run), tuple(run)))
+    return pieces
+
+
+def _read_piece(piece: FilePiece) -> laspy.ScaleAwarePointRecord:
+    with laspy.open(piece.path) as reader:
+        header = reader.header
+        laszip_vlrs = [vlr for vlr in header.vlrs if vlr.record_id == 22204]
+    point_format = header.point_format
+
+    with open(piece.path, "rb") as stream:
+        stream.seek(piece.byte_start)
+        if piece.chunk_table is None:
+            data = bytearray(stream.read(piece.point_count * point_format.size))
+        else:
+            compressed = stream.read(sum(size for _, size in piece.chunk_table))
+            data = bytearray(piece.point_count * point_format.size)
+            lazrs.decompress_points_with_chunk_table(
+                compressed,
+                laszip_vlrs[0].record_data_bytes(),
+                data,
+                list(piece.chunk_table),
+                lazrs.DecompressionSelection(COLORING_DECOMPRESSION),
+            )
+
+    points = np.frombuffer(data, dtype=point_format.dtype(), count=piece.point_count)
+    return laspy.ScaleAwarePointRecord(points, point_format, header.scales, header.offsets)
+
+
+def _piece_instance_sums(task: Tuple[FilePiece, List[str], int, int]) -> Dict[str, object]:
+    """Per instance id: point count and integer coordinate sums over one piece of one file."""
+    piece, instance_attributes, ground_instance_id, chunk_size = task
+    record = _read_piece(piece)
+    sums: Dict[str, Dict[int, List[int]]] = {attribute: {} for attribute in instance_attributes}
+    for first in range(0, len(record), chunk_size):
+        chunk = record[first:first + chunk_size]
+        raw = [np.asarray(values, dtype=np.int64) for values in (chunk.X, chunk.Y, chunk.Z)]
+        for instance_attribute in instance_attributes:
+            ids = _coerce_instance_ids(chunk[instance_attribute])
+            if ids.size == 0:
+                continue
+            keep = ~is_ground_instance_ids(ids, ground_instance_id)
+            unique_ids, inverse = np.unique(ids, return_inverse=True)
+            counts = np.bincount(inverse)
+            # float64 holds these per-chunk integer sums exactly (below 2^53 for chunks up to 4M points)
+            axis_sums = [
+                np.rint(np.bincount(inverse[keep], weights=raw[axis][keep], minlength=len(unique_ids))).astype(np.int64)
+                for axis in range(3)
+            ]
+            target = sums[instance_attribute]
+            for idx, instance_id in enumerate(unique_ids.tolist()):
+                entry = target.setdefault(instance_id, [0, 0, 0, 0])
+                entry[0] += int(counts[idx])
+                entry[1] += int(axis_sums[0][idx])
+                entry[2] += int(axis_sums[1][idx])
+                entry[3] += int(axis_sums[2][idx])
+    with laspy.open(piece.path) as reader:
+        scale_offset = (tuple(reader.header.scales), tuple(reader.header.offsets))
+    result: Dict[str, object] = dict(sums)
+    result["scale_offset"] = scale_offset
+    return result
+
+
+def _add_file_sums(
+    stats: Dict[int, InstanceStats],
+    partial_sums: Sequence[Dict[int, List[int]]],
+    scale_offset: Tuple[Tuple[float, ...], Tuple[float, ...]],
+    ground_instance_id: int,
+) -> None:
+    totals: Dict[int, List[int]] = {}
+    for partial in partial_sums:
+        for instance_id, (count, sx, sy, sz) in partial.items():
+            entry = totals.setdefault(instance_id, [0, 0, 0, 0])
+            entry[0] += count
+            entry[1] += sx
+            entry[2] += sy
+            entry[3] += sz
+    (scale_x, scale_y, scale_z), (offset_x, offset_y, offset_z) = scale_offset
+    for instance_id in sorted(totals):
+        count, sx, sy, sz = totals[instance_id]
+        stat = stats.setdefault(int(instance_id), InstanceStats())
+        stat.count += count
+        if not is_ground_instance_id(instance_id, ground_instance_id):
+            stat.sum_x += sx * scale_x + count * offset_x
+            stat.sum_y += sy * scale_y + count * offset_y
+            stat.sum_z += sz * scale_z + count * offset_z
 
 
 def assign_coloring_ids(
@@ -811,6 +1010,20 @@ def is_ground_instance_id(instance_id: int, ground_instance_id: int = GROUND_INS
 
 def is_ground_instance_ids(ids: np.ndarray, ground_instance_id: int = GROUND_INSTANCE_ID) -> np.ndarray:
     return (ids == ground_instance_id) | (ids < 0)
+
+
+def write_coloring_table(
+    table_path: Path,
+    instance_to_coloring_id: Mapping[int, int],
+    *,
+    instance_attribute: str,
+    color_attribute: str,
+    ground_instance_id: int = GROUND_INSTANCE_ID,
+) -> None:
+    """Write the id table PotreeConverter reads with --instance-coloring."""
+    lines = [f"source {instance_attribute}", f"target {color_attribute}", f"ground {int(ground_instance_id)}"]
+    lines.extend(f"{int(key)} {int(value)}" for key, value in sorted(instance_to_coloring_id.items()))
+    table_path.write_text("\n".join(lines) + "\n")
 
 
 def write_mapping_json(

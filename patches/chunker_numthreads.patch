@@ -1,0 +1,15 @@
+diff --git a/Converter/src/chunker_countsort_laszip.cpp b/Converter/src/chunker_countsort_laszip.cpp
+index 3ef1769..bfd4d28 100644
+--- a/Converter/src/chunker_countsort_laszip.cpp
++++ b/Converter/src/chunker_countsort_laszip.cpp
+@@ -1220,6 +1220,10 @@ namespace chunker_countsort_laszip {
+ 
+ 		auto tStart = now();
+ 
++		// these are initialized before main() parses --numthreads
++		numChunkerThreads = getCpuData().numProcessors;
++		numFlushThreads = getCpuData().numProcessors;
++
+ 		int64_t tmp = state.pointsTotal / 20;
+ 		maxPointsPerChunk = std::min(tmp, int64_t(10'000'000));
+ 		// cout << "maxPointsPerChunk: " << maxPointsPerChunk << endl;

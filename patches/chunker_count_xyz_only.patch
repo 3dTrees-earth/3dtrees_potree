@@ -1,0 +1,13 @@
+diff --git a/Converter/src/chunker_countsort_laszip.cpp b/Converter/src/chunker_countsort_laszip.cpp
+index bfd4d28..87fac74 100644
+--- a/Converter/src/chunker_countsort_laszip.cpp
++++ b/Converter/src/chunker_countsort_laszip.cpp
+@@ -197,6 +197,8 @@ namespace chunker_countsort_laszip {
+ 				laszip_BOOL request_reader = 1;
+ 
+ 				laszip_create(&laszip_reader);
++				// counting needs only coordinates; LAS 1.4 point formats (COPC) can skip decoding the rest
++				laszip_decompress_selective(laszip_reader, laszip_DECOMPRESS_SELECTIVE_CHANNEL_RETURNS_XY | laszip_DECOMPRESS_SELECTIVE_Z);
+ 				laszip_request_compatibility_mode(laszip_reader, request_reader);
+ 				laszip_open_reader(laszip_reader, path.c_str(), &is_compressed);
+ 				laszip_seek_point(laszip_reader, task->firstPoint);

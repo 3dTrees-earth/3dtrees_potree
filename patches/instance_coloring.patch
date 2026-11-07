@@ -1,0 +1,210 @@
+diff --git a/Converter/include/chunker_countsort_laszip.h b/Converter/include/chunker_countsort_laszip.h
+index cd4318e..d7ac92b 100644
+--- a/Converter/include/chunker_countsort_laszip.h
++++ b/Converter/include/chunker_countsort_laszip.h
+@@ -3,6 +3,7 @@
+ 
+ #include <string>
+ #include <vector>
++#include <unordered_map>
+ 
+ #include "Vector3.h"
+ #include "Attributes.h"
+@@ -16,6 +17,19 @@ class State;
+ 
+ namespace chunker_countsort_laszip {
+ 
++	// A uint16 output attribute derived from an instance attribute through an id -> colour id table.
++	// Lets the viewer colour trees without first writing a recoloured copy of the input.
++	struct InstanceColoring {
++		string source;
++		string target;
++		int64_t groundId = 0;
++		std::unordered_map<int64_t, uint16_t> colorIds;
++	};
++
++	extern vector<InstanceColoring> instanceColorings;
++
++	vector<InstanceColoring> loadInstanceColorings(vector<string> paths);
++
+ 	void doChunking(vector<Source> sources, string targetDir, Vector3 min, Vector3 max, State& state, Attributes outputAttributes, Monitor* monitor, int gridSizeOverride = 0);
+ 
+ }
+\ No newline at end of file
+diff --git a/Converter/include/converter_utils.h b/Converter/include/converter_utils.h
+index d86a002..ebbc0dc 100644
+--- a/Converter/include/converter_utils.h
++++ b/Converter/include/converter_utils.h
+@@ -175,5 +175,6 @@ struct Options {
+ 	bool noIndexing = false;
+ 	int gridSize = 0;
+ 	int numThreads = 0;
++	vector<string> instanceColorings;
+ 
+ };
+diff --git a/Converter/src/chunker_countsort_laszip.cpp b/Converter/src/chunker_countsort_laszip.cpp
+index 87fac74..5897bda 100644
+--- a/Converter/src/chunker_countsort_laszip.cpp
++++ b/Converter/src/chunker_countsort_laszip.cpp
+@@ -1,5 +1,7 @@
+ 
+ #include <iostream>
++#include <fstream>
++#include <cmath>
+ #include <filesystem>
+ #include <unordered_map>
+ #include <thread>
+@@ -51,6 +53,47 @@ namespace chunker_countsort_laszip {
+ 	int gridSize = 128;
+ 	mutex mtx_attributes;
+ 
++	vector<InstanceColoring> instanceColorings;
++
++	// file format: "source <attribute>", "target <attribute>", "ground <id>", then one "<instance id> <colour id>" per line
++	vector<InstanceColoring> loadInstanceColorings(vector<string> paths) {
++		vector<InstanceColoring> colorings;
++
++		for (auto& path : paths) {
++			InstanceColoring coloring;
++			std::ifstream file(path);
++			string key;
++
++			if (!file) {
++				logger::ERROR("could not read instance coloring file " + path);
++				exit(123);
++			}
++
++			while (file >> key) {
++				if (key == "source") {
++					file >> coloring.source;
++				} else if (key == "target") {
++					file >> coloring.target;
++				} else if (key == "ground") {
++					file >> coloring.groundId;
++				} else {
++					int64_t colorId;
++					file >> colorId;
++					coloring.colorIds[std::stoll(key)] = uint16_t(colorId);
++				}
++			}
++
++			if (coloring.source.empty() || coloring.target.empty()) {
++				logger::ERROR("instance coloring file needs a source and a target: " + path);
++				exit(123);
++			}
++
++			colorings.push_back(coloring);
++		}
++
++		return colorings;
++	}
++
+ 	struct Point {
+ 		double x;
+ 		double y;
+@@ -591,12 +634,15 @@ namespace chunker_countsort_laszip {
+ 				attributeOffset += inputAttributes.list[i].size;
+ 			}
+ 
++			unordered_map<string, int> extraOffsets;
++
+ 			for (int i = firstExtraIndex; i < inputAttributes.list.size(); i++) {
+ 				Attribute& inputAttribute = inputAttributes.list[i];
+ 				Attribute* attribute = outputAttributes.get(inputAttribute.name);
+ 				int targetOffset = outputAttributes.getOffset(inputAttribute.name);
+ 
+ 				int attributeSize = inputAttribute.size;
++				extraOffsets[inputAttribute.name] = sourceOffset;
+ 
+ 				if (attribute != nullptr) {
+ 					auto handleAttribute = [data, point, header, attributeSize, attributeOffset, sourceOffset, attribute](int64_t offset) {
+@@ -665,6 +711,54 @@ namespace chunker_countsort_laszip {
+ 				attributeOffset += attribute->size;
+ 			}
+ 
++			for (auto& coloring : instanceColorings) {
++				Attribute* inputAttribute = inputAttributes.get(coloring.source);
++				Attribute* target = outputAttributes.get(coloring.target);
++
++				if (inputAttribute == nullptr || extraOffsets.find(coloring.source) == extraOffsets.end() || inputAttribute->numElements != 1) {
++					logger::ERROR("instance coloring source is not a scalar extra attribute of the input: " + coloring.source);
++					exit(123);
++				}
++
++				int sourceOffset = extraOffsets[coloring.source];
++				int targetOffset = outputAttributes.getOffset(coloring.target);
++				AttributeType type = inputAttribute->type;
++
++				auto handleColoring = [data, point, sourceOffset, targetOffset, type, target, &coloring](int64_t offset) {
++					uint8_t* value = point->extra_bytes + sourceOffset;
++
++					double raw = 0.0;
++					if (type == AttributeType::INT8) raw = asDouble<int8_t>(value);
++					else if (type == AttributeType::INT16) raw = asDouble<int16_t>(value);
++					else if (type == AttributeType::INT32) raw = asDouble<int32_t>(value);
++					else if (type == AttributeType::INT64) raw = asDouble<int64_t>(value);
++					else if (type == AttributeType::UINT8) raw = asDouble<uint8_t>(value);
++					else if (type == AttributeType::UINT16) raw = asDouble<uint16_t>(value);
++					else if (type == AttributeType::UINT32) raw = asDouble<uint32_t>(value);
++					else if (type == AttributeType::UINT64) raw = asDouble<uint64_t>(value);
++					else if (type == AttributeType::FLOAT) raw = asDouble<float>(value);
++					else if (type == AttributeType::DOUBLE) raw = asDouble<double>(value);
++
++					int64_t instanceId = int64_t(std::nearbyint(raw));
++					uint16_t colorId = 0;
++
++					auto it = coloring.colorIds.find(instanceId);
++					if (it != coloring.colorIds.end()) {
++						colorId = it->second;
++					} else if (instanceId != coloring.groundId && instanceId >= 0) {
++						logger::ERROR("no colour id for " + coloring.source + " value " + to_string(instanceId));
++						exit(123);
++					}
++
++					memcpy(data + offset + targetOffset, &colorId, 2);
++
++					target->min.x = std::min(target->min.x, double(colorId));
++					target->max.x = std::max(target->max.x, double(colorId));
++				};
++
++				handlers.push_back(handleColoring);
++			}
++
+ 		}
+ 
+ 
+diff --git a/Converter/src/main.cpp b/Converter/src/main.cpp
+index 13c3af7..a45d1ed 100644
+--- a/Converter/src/main.cpp
++++ b/Converter/src/main.cpp
+@@ -33,6 +33,7 @@ Options parseArguments(int argc, char** argv) {
+ 	args.addArgument("attributes", "Attributes in output file");
+ 	args.addArgument("projection", "Add the projection of the pointcloud to the metadata");
+ 	args.addArgument("numthreads", "Override detected CPU count / worker thread count");
++	args.addArgument("instance-coloring", "File mapping an instance attribute to colour ids, added as a uint16 attribute (repeatable)");
+ 	args.addArgument("generate-page,p", "Generate a ready to use web page with the given name");
+ 	args.addArgument("title", "Page title used when generating a web page");
+ 	args.addArgument("grid-size", "Grid size for chunking (default: auto based on point count)");
+@@ -140,6 +141,7 @@ Options parseArguments(int argc, char** argv) {
+ 	options.noIndexing = noIndexing;
+ 	options.gridSize = gridSize;
+ 	options.numThreads = numThreads;
++	options.instanceColorings = args.get("instance-coloring").as<vector<string>>();
+ 
+ 	//cout << "flags: ";
+ 	//for (string flag : options.flags) {
+@@ -538,6 +540,14 @@ int main(int argc, char** argv) {
+ 	}
+ 
+ 	auto outputAttributes = computeOutputAttributes(sources, options.attributes);
++
++	chunker_countsort_laszip::instanceColorings = chunker_countsort_laszip::loadInstanceColorings(options.instanceColorings);
++	for (auto& coloring : chunker_countsort_laszip::instanceColorings) {
++		Attribute attribute(coloring.target, 2, 1, 2, AttributeType::UINT16);
++		attribute.description = "Special coloring id";
++		outputAttributes.list.push_back(attribute);
++		outputAttributes.bytes += attribute.size;
++	}
+ 	cout << toString(outputAttributes);
+ 
+ 	auto stats = computeStats(sources);

@@ -4,6 +4,9 @@
 #   - memory leak fix (PR #666): removes parallel sort to prevent TBB memory leak
 #   - numthreads override (PR #575-inspired): cap detected CPU count / workers
 #   - --grid-size CLI option: override auto-detected chunking grid resolution
+#   - 64-bit LASzip point indexes: LAZ files above 2^32 points
+#   - Poisson sampler: buffer grows past 1M accepted points per node, grid-based accept test
+#   - parallel sampling of chunk roots and upper octree levels
 
 FROM python:3.11-slim AS builder
 
@@ -70,6 +73,29 @@ RUN sed -i 's/\r$//' Converter/include/converter_utils.h \
     # 8) Pass gridSize through chunking() to doChunking()
     sed -i 's/state, outputAttributes, monitor);/state, outputAttributes, monitor, options.gridSize);/' \
         Converter/src/main.cpp
+
+# Make --numthreads reach the chunker, whose thread counts are set before main() runs
+RUN git apply -p1 /opt/patches/chunker_numthreads.patch
+
+# Counting needs only coordinates; skip decoding the other fields of LAS 1.4 (COPC) input
+RUN git apply -p1 /opt/patches/chunker_count_xyz_only.patch
+
+# Poisson sampler: no 1M-point limit per node, and a spacing grid for the accept test
+RUN git apply -p1 /opt/patches/sampler_poisson.patch
+
+# Sample chunk roots and upper octree levels on all threads instead of one
+RUN sed -i 's/\r$//' Converter/src/indexer.cpp Converter/include/indexer.h && \
+    git apply -p1 /opt/patches/indexer_parallel_chunk_roots.patch
+
+# Make LAZ seeks work above 2^32 points (the bundled LASzip keeps point indexes in 32 bits)
+RUN sed -i 's/\r$//' \
+        Converter/libs/laszip/src/lasreadpoint.cpp \
+        Converter/libs/laszip/src/lasreadpoint.hpp \
+        Converter/libs/laszip/src/laszip_dll.cpp && \
+    git apply -p1 /opt/patches/laszip_64bit_point_index.patch
+
+# --instance-coloring: colour ids from an instance attribute, so special colouring needs no recoloured copy
+RUN git apply -p1 /opt/patches/instance_coloring.patch
 
 # Build PotreeConverter
 WORKDIR /opt/potree_source/build

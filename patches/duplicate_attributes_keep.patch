@@ -1,68 +1,101 @@
 diff --git a/Converter/include/PotreeConverter.h b/Converter/include/PotreeConverter.h
-index 5260056..6881049 100644
+index b15d03f..fb304a1 100644
 --- a/Converter/include/PotreeConverter.h
 +++ b/Converter/include/PotreeConverter.h
-@@ -202,13 +202,14 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
- 	Vector3 scale, offset;
+@@ -95,9 +95,10 @@ inline vector<Attribute> parseExtraAttributes(LasHeader& header) {
+ 				uint8_t type = read<uint8_t>(extraData, offset + 2);
+ 				uint8_t options = read<uint8_t>(extraData, offset + 3);
+ 				
++				// LAS fills these fields without a terminator when they use all 32 bytes
+ 				char chrName[32];
+ 				memcpy(chrName, extraData.data() + offset + 4, 32);
+-				string name(chrName);
++				string name(chrName, strnlen(chrName, 32));
+ 
+ 				Vector3 aScale = {1.0, 1.0, 1.0};
+ 				Vector3 aOffset = {0.0, 0.0, 0.0};
+@@ -110,7 +111,7 @@ inline vector<Attribute> parseExtraAttributes(LasHeader& header) {
+ 
+ 				char chrDescription[32];
+ 				memcpy(chrDescription, extraData.data() + offset + 160, 32);
+-				string description(chrDescription);
++				string description(chrDescription, strnlen(chrDescription, 32));
+ 
+ 				auto info = lasTypeInfo(type);
+ 				string typeName = getAttributeTypename(info.type);
+@@ -192,6 +193,25 @@ inline vector<Attribute> computeOutputAttributes(LasHeader& header) {
+ 	return list;
+ }
+ 
++// Names repeated within one file keep every copy as name_1, name_2, ...
++// Names that occur once stay unchanged.
++inline vector<Attribute> renameRepeatedAttributes(vector<Attribute> attributes) {
++	unordered_map<string, int> total;
++	for (auto& attribute : attributes) {
++		total[attribute.name]++;
++	}
++
++	unordered_map<string, int> seen;
++	for (auto& attribute : attributes) {
++		if (total[attribute.name] > 1) {
++			string name = attribute.name;
++			attribute.name = name + "_" + to_string(++seen[name]);
++		}
++	}
++
++	return attributes;
++}
++
+ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string> requestedAttributes) {
+ 	// TODO: a bit wasteful to iterate over source files and load headers twice
+ 
+@@ -203,28 +223,20 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
  
  	vector<Attribute> fullAttributeList;
--	unordered_map<string, int> acceptedAttributeNames;
-+	// Count per base name; only duplicates get _1, _2, ... (first keeps original name)
-+	unordered_map<string, int> attributeNameCount;
+ 	unordered_map<string, int> acceptedAttributeNames;
++	vector<vector<Attribute>> attributesPerSource(sources.size());
  
  	// compute scale and offset from all sources
  	{
  		mutex mtx;
  		auto parallel = std::execution::par;
 -		for_each(parallel, sources.begin(), sources.end(), [&mtx, &sources, &scaleMin, &min, &max, requestedAttributes, &fullAttributeList, &acceptedAttributeNames](Source source) {
-+		for_each(parallel, sources.begin(), sources.end(), [&mtx, &sources, &scaleMin, &min, &max, requestedAttributes, &fullAttributeList, &attributeNameCount](Source source) {
++		for_each(parallel, sources.begin(), sources.end(), [&mtx, &sources, &scaleMin, &min, &max, requestedAttributes, &attributesPerSource](Source& source) {
  
  			auto header = loadLasHeader(source.path);
  
-@@ -217,11 +218,17 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
+-			vector<Attribute> attributes = computeOutputAttributes(header);
++			attributesPerSource[&source - sources.data()] = renameRepeatedAttributes(computeOutputAttributes(header));
+ 
  			mtx.lock();
-
- 			for (auto& attribute : attributes) {
+ 
+-			for (auto& attribute : attributes) {
 -				bool alreadyAdded = acceptedAttributeNames.find(attribute.name) != acceptedAttributeNames.end();
 -
 -				if (!alreadyAdded) {
 -					fullAttributeList.push_back(attribute);
 -					acceptedAttributeNames[attribute.name] = 1;
 -				}
-+				auto it = attributeNameCount.find(attribute.name);
-+				if (it == attributeNameCount.end()) {
-+					// First occurrence: keep original name
-+					fullAttributeList.push_back(attribute);
-+					attributeNameCount[attribute.name] = 1;
-+				} else {
-+					// Duplicate: temporary _2, _3, ...; post-pass will make _1,_2 if multiple
-+					int count = ++(it->second);
-+					Attribute copy = attribute;
-+					copy.name = attribute.name + "_" + to_string(count);
-+					fullAttributeList.push_back(copy);
-+				}
- 			}
-
-@@ -255,3 +255,22 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
+-			}
+-
+ 			scaleMin.x = std::min(scaleMin.x, header.scale.x);
+ 			scaleMin.y = std::min(scaleMin.y, header.scale.y);
+ 			scaleMin.z = std::min(scaleMin.z, header.scale.z);
+@@ -240,6 +252,17 @@ inline Attributes computeOutputAttributes(vector<Source>& sources, vector<string
+ 			mtx.unlock();
  			});
-
-+		// If base occurs multiple times, rename the one with no suffix to base_1
-+		unordered_map<string, vector<size_t>> baseToIndices;
-+		for (size_t i = 0; i < fullAttributeList.size(); i++) {
-+			string name = fullAttributeList[i].name;
-+			size_t pos = name.rfind('_');
-+			string base = name;
-+			if (pos != string::npos && pos > 0 && pos + 1 < name.size()) {
-+				bool allDigits = true;
-+				for (size_t j = pos + 1; j < name.size(); j++)
-+					if (!isdigit((unsigned char)name[j])) { allDigits = false; break; }
-+				if (allDigits) base = name.substr(0, pos);
+ 
++		// The same name in another file is the same attribute, not a new one.
++		// Merged in source order so the layout doesn't depend on thread timing.
++		for (auto& attributes : attributesPerSource) {
++			for (auto& attribute : attributes) {
++				if (acceptedAttributeNames.find(attribute.name) == acceptedAttributeNames.end()) {
++					fullAttributeList.push_back(attribute);
++					acceptedAttributeNames[attribute.name] = 1;
++				}
 +			}
-+			baseToIndices[base].push_back(i);
 +		}
-+		for (auto& p : baseToIndices)
-+			if (p.second.size() > 1)
-+				for (size_t k : p.second)
-+					if (fullAttributeList[k].name == p.first) { fullAttributeList[k].name = p.first + "_1"; break; }
 +
  		auto scaleOffset = computeScaleOffset(min, max, scaleMin);
+ 		scale = scaleOffset.scale;
+ 		offset = scaleOffset.offset;

@@ -143,6 +143,8 @@ def run(params: Parameters) -> str:
             attributes=attributes,
         ),
         run_command=run_command,
+        converter_colors_instances=converter_supports_argument("--instance-coloring"),
+        workers=max(params.numthreads, 1),
     )
 
 

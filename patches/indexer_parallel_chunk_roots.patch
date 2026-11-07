@@ -1,0 +1,99 @@
+diff --git a/Converter/include/indexer.h b/Converter/include/indexer.h
+index 9bf79de..c29ff5a 100644
+--- a/Converter/include/indexer.h
++++ b/Converter/include/indexer.h
+@@ -260,7 +260,7 @@ namespace indexer{
+ 		Node* node;
+ 		vector<shared_ptr<CRNode>> children;
+ 		vector<FlushedChunkRoot> fcrs;
+-		int numPoints = 0;
++		int64_t numPoints = 0;
+ 
+ 		CRNode(){
+ 			children.resize(8, nullptr);
+diff --git a/Converter/src/indexer.cpp b/Converter/src/indexer.cpp
+index 0cebc2e..b1b7c97 100644
+--- a/Converter/src/indexer.cpp
++++ b/Converter/src/indexer.cpp
+@@ -246,7 +246,7 @@ namespace indexer{
+ 
+ 			}else{
+ 
+-				int numPoints = 0;
++				int64_t numPoints = 0;
+ 				for(auto child : node->children){
+ 					if(!child) continue;
+ 
+@@ -1716,19 +1716,27 @@ void doIndexing(string targetDir, State& state, Options& options, Sampler& sampl
+ 		string tmpChunkRootsPath = targetDir + "/tmpChunkRoots.bin";
+ 		auto tasks = indexer.processChunkRoots();
+ 
+-		for(auto& task : tasks){
++		// each task is a separate subtree, so they can be sampled side by side
++		TaskPool<CRNode> chunkRootPool(numSampleThreads(), [&tmpChunkRootsPath, &sampler, &attributes, &indexer, &onNodeCompleted, &onNodeDiscarded](auto task) {
+ 
+-			for(auto& fcr : task.fcrs){
++			for(auto& fcr : task->fcrs){
+ 				auto buffer = make_shared<Buffer>(fcr.size);
+ 				readBinaryFile(tmpChunkRootsPath, fcr.offset, fcr.size, buffer->data);
+ 
+ 				fcr.node->points = buffer;
+ 			}
+ 
+-			sampler.sample(task.node, attributes, indexer.spacing, onNodeCompleted, onNodeDiscarded);
++			sampler.sample(task->node, attributes, indexer.spacing, onNodeCompleted, onNodeDiscarded);
++
++			task->node->children.clear();
++		});
+ 
+-			task.node->children.clear();
++		for(auto& task : tasks){
++			chunkRootPool.addTask(make_shared<CRNode>(task));
+ 		}
++
++		chunkRootPool.waitTillEmpty();
++		chunkRootPool.close();
+ 	}
+ 
+ 
+@@ -1738,7 +1746,39 @@ void doIndexing(string targetDir, State& state, Options& options, Sampler& sampl
+ 
+ 		indexer.root = node;
+ 	} else if (!indexer.root->sampled){
+-		sampler.sample(indexer.root.get(), attributes, indexer.spacing, onNodeCompleted, onNodeDiscarded);
++		// nodes of one level are independent, so sample level by level from the deepest up
++		vector<vector<Node*>> levels;
++		function<void(Node*)> gather = [&levels, &gather](Node* node) {
++			if (node->sampled) {
++				return;
++			}
++
++			int64_t level = node->level();
++			if (levels.size() <= level) {
++				levels.resize(level + 1);
++			}
++			levels[level].push_back(node);
++
++			for (auto child : node->children) {
++				if (child != nullptr) {
++					gather(child.get());
++				}
++			}
++		};
++		gather(indexer.root.get());
++
++		for (int64_t level = levels.size() - 1; level >= 0; level--) {
++			TaskPool<Node*> levelPool(numSampleThreads(), [&sampler, &attributes, &indexer, &onNodeCompleted, &onNodeDiscarded](auto node) {
++				sampler.sample(*node, attributes, indexer.spacing, onNodeCompleted, onNodeDiscarded);
++			});
++
++			for (Node* node : levels[level]) {
++				levelPool.addTask(make_shared<Node*>(node));
++			}
++
++			levelPool.waitTillEmpty();
++			levelPool.close();
++		}
+ 	}
+ 
+ 	// root is automatically finished after subsampling all descendants
